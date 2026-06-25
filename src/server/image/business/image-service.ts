@@ -1,4 +1,6 @@
+import { createHash, randomUUID } from "node:crypto";
 import type {
+  AccountEntitlement,
   CreateImageTaskInput,
   DownloadDecision,
   ImageAsset,
@@ -8,8 +10,16 @@ import type {
   ListImageTasksQuery,
   PaginationMeta
 } from "@/types/image";
-import { submitImageGeneration } from "@/server/image/ai/image-model-adapter";
+import { pollImageGenerationResult, submitImageGeneration } from "@/server/image/ai/image-model-adapter";
+import { getImageModelConfig } from "@/server/image/ai/model-config";
 import { getRepositories } from "@/server/data/repositories";
+import { CreditBalanceError, finalizeCreditHoldSpend, getAvailableCredits, refundCreditHold, releaseCreditHold, reserveCreditsForGeneration, settleCreditHoldPartially, spendCreditsForDownload } from "@/server/credits/credit-service";
+import { createGeneratedAsset, storeGeneratedOutput, UploadValidationError, type StoredGeneratedOutput } from "@/server/image/storage/upload-service";
+import { assertObjectReadable } from "@/server/storage/object-storage";
+import { assertRunningTaskLimit, assertTaskCapability, assertTaskStateTransition, getTaskPriority } from "./task-policy";
+
+const freeAssetRetentionDays = 7;
+const freeAssetRetentionLimit = 20;
 
 function paginate<T>(items: T[], query: { page?: number; pageSize?: number }) {
   const page = query.page || 1;
@@ -53,42 +63,71 @@ function filterTasks(tasks: ImageGenerationTask[], query: ListImageTasksQuery) {
   });
 }
 
-export async function listAssets(query: ListImageAssetsQuery = {}) {
+function applyVisibleAssetRetention(assets: ImageAsset[], account: AccountEntitlement, now = new Date()) {
+  if (account.memberStatus !== "free") return assets;
+  const cutoff = now.getTime() - freeAssetRetentionDays * 24 * 60 * 60 * 1000;
+  return assets
+    .filter(asset => Date.parse(asset.createdAt) >= cutoff)
+    .slice(0, freeAssetRetentionLimit);
+}
+
+async function listVisibleAssetsForUser(userId: string) {
+  const repositories = getRepositories();
+  const [assets, account] = await Promise.all([
+    repositories.image.listAssets({ userId }),
+    repositories.account.getCurrentAccount(userId)
+  ]);
+  return applyVisibleAssetRetention(assets, account);
+}
+
+export async function listAssets(query: ListImageAssetsQuery = {}, userId?: string) {
   const repositories = getRepositories();
   const [assets, versionNodes] = await Promise.all([
-    repositories.image.listAssets(),
+    userId ? listVisibleAssetsForUser(userId) : repositories.image.listAssets({ userId }),
     repositories.image.listVersionNodes()
   ]);
   const filteredAssets = filterAssets(assets, query);
   const pagedAssets = paginate(filteredAssets, query);
-  return { assets: pagedAssets.items, versionNodes, pagination: pagedAssets.pagination };
+  const visibleAssetIds = new Set(filteredAssets.map(asset => asset.id));
+  return {
+    assets: pagedAssets.items,
+    versionNodes: versionNodes.filter(node => visibleAssetIds.has(node.assetId)),
+    pagination: pagedAssets.pagination
+  };
 }
 
-export async function getAsset(assetId: string) {
-  return getRepositories().image.getAsset(assetId);
+export async function getAsset(assetId: string, userId?: string) {
+  if (!userId) {
+    const asset = await getRepositories().image.getAsset(assetId);
+    return asset?.deletedAt ? undefined : asset;
+  }
+  return (await listVisibleAssetsForUser(userId)).find(asset => asset.id === assetId);
 }
 
-export async function listTasks(query: ListImageTasksQuery = {}) {
-  const tasks = await getRepositories().image.listTasks();
+export async function listTasks(query: ListImageTasksQuery = {}, userId?: string) {
+  const tasks = await getRepositories().image.listTasks({ userId });
   const filteredTasks = filterTasks(tasks, query);
   const pagedTasks = paginate(filteredTasks, query);
   return { tasks: pagedTasks.items, pagination: pagedTasks.pagination };
 }
 
-export async function getTask(taskId: string) {
-  return getRepositories().image.getTask(taskId);
+export async function getTask(taskId: string, userId?: string) {
+  const task = await getRepositories().image.getTask(taskId);
+  if (!task || (userId && task.userId !== userId)) return undefined;
+  return task;
 }
 
-export async function getAssetDetail(assetId: string): Promise<ImageAssetDetail | undefined> {
+export async function getAssetDetail(assetId: string, userId?: string): Promise<ImageAssetDetail | undefined> {
   const repositories = getRepositories();
-  const [asset, tasks, versionNodes, downloadDecision] = await Promise.all([
-    repositories.image.getAsset(assetId),
-    repositories.image.listTasks(),
-    repositories.image.listVersionNodes(),
-    decideDownload(assetId)
-  ]);
+  const asset = await getAsset(assetId, userId);
 
   if (!asset) return undefined;
+
+  const [tasks, versionNodes, downloadDecision] = await Promise.all([
+    repositories.image.listTasks({ userId }),
+    repositories.image.listVersionNodes(),
+    decideDownload(assetId, userId)
+  ]);
 
   const task = tasks.find(item => item.id === asset.taskId || item.resultAssetIds.includes(asset.id));
   const actions: ImageAssetDetail["availableActions"] = asset.status === "succeeded"
@@ -104,42 +143,321 @@ export async function getAssetDetail(assetId: string): Promise<ImageAssetDetail 
   };
 }
 
-export async function createTask(input: CreateImageTaskInput): Promise<ImageGenerationTask> {
+export async function createTask(input: CreateImageTaskInput, userId?: string): Promise<ImageGenerationTask> {
   const repositories = getRepositories();
-  const account = await repositories.account.getCurrentAccount();
-  const submission = await submitImageGeneration(input);
-  const chargedCredits = input.taskType === "outpaint" ? 36 : input.taskType === "i2i" ? 32 : 18;
-  const now = new Date().toISOString();
+  if (!userId) throw new Error("AUTH_REQUIRED");
+  const accountBeforeHold = await getAvailableCredits(userId);
+  assertTaskCapability(accountBeforeHold, input.taskType);
+  const existingTasks = await repositories.image.listTasks({ userId });
+  assertRunningTaskLimit(accountBeforeHold, existingTasks);
 
-  const task: ImageGenerationTask = {
-    id: `TSK-${Date.now().toString(36).toUpperCase()}`,
-    userId: account.userId,
-    taskType: input.taskType,
-    status: "queued",
-    prompt: input.prompt,
-    negativePrompt: input.negativePrompt,
-    requestPayload: {
-      ...input,
-      externalTaskId: submission.externalTaskId,
-      estimatedDurationMs: submission.estimatedDurationMs
-    },
-    modelProvider: submission.provider,
-    modelName: submission.modelName,
-    sourceAssetId: input.sourceAssetId,
-    chargedCredits,
-    resultAssetIds: [],
-    createdAt: now,
-    updatedAt: now
-  };
+  const taskId = `TSK-${Date.now().toString(36).toUpperCase()}`;
+  const { account, requiredCredits, hold } = await reserveCreditsForGeneration(userId, { taskId, taskType: input.taskType, count: input.count });
+  const modelConfig = getImageModelConfig();
+  try {
+    const now = new Date().toISOString();
 
-  return repositories.image.createTask(task);
+    const task: ImageGenerationTask = {
+      id: taskId,
+      userId: account.userId,
+      taskType: input.taskType,
+      status: "queued",
+      prompt: input.prompt,
+      negativePrompt: input.negativePrompt,
+      requestPayload: {
+        ...input
+      },
+      modelProvider: input.modelProvider || modelConfig.provider,
+      modelName: input.modelName || modelConfig.model,
+      sourceAssetId: input.sourceAssetId,
+      chargedCredits: requiredCredits,
+      priority: getTaskPriority(account.memberStatus),
+      creditHoldId: hold.id,
+      resultAssetIds: [],
+      createdAt: now,
+      updatedAt: now
+    };
+
+    return repositories.image.createTask(task);
+  } catch (error) {
+    await releaseCreditHold(hold.id, "Generation Credit Hold Released");
+    throw error;
+  }
 }
 
-export async function decideDownload(assetId: string): Promise<DownloadDecision> {
+export async function transitionTaskState(taskId: string, nextStatus: ImageGenerationTask["status"], userId?: string, options: { errorCode?: string; errorMessage?: string } = {}) {
+  const repositories = getRepositories();
+  const task = await getTask(taskId, userId);
+  if (!task) return undefined;
+
+  assertTaskStateTransition(task.status, nextStatus);
+
+  if (task.creditHoldId && nextStatus === "succeeded") {
+    const hold = await repositories.credits.getHold(task.creditHoldId);
+    if (hold?.status === "active") {
+      await finalizeCreditHoldSpend(task.creditHoldId);
+    }
+  }
+
+  if (task.creditHoldId && (nextStatus === "failed" || nextStatus === "refunded")) {
+    const hold = await repositories.credits.getHold(task.creditHoldId);
+    if (hold?.status === "active") {
+      await releaseCreditHold(task.creditHoldId, nextStatus === "refunded" ? "Generation Credit Refunded" : "Generation Credit Hold Released");
+    } else if (hold?.status === "spent") {
+      await refundCreditHold(task.creditHoldId, "Generation Credit Refund");
+    }
+  }
+
+  return repositories.image.updateTask(task.id, {
+    status: nextStatus,
+    errorCode: options.errorCode,
+    errorMessage: options.errorMessage
+  });
+}
+
+async function reviewStoredOutput(output: StoredGeneratedOutput, expectedSize?: string) {
+  if (output.mimeType !== "image/png" && output.mimeType !== "image/jpeg" && output.mimeType !== "image/webp") {
+    return { approved: false, reason: "output review rejected unsupported image format" };
+  }
+  if (output.width <= 0 || output.height <= 0) {
+    return { approved: false, reason: "output review rejected unreadable image dimensions" };
+  }
+  try {
+    await assertObjectReadable(output.objectKey);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "stored object could not be read";
+    return { approved: false, reason: `output review rejected unreadable stored file: ${detail}` };
+  }
+  if (expectedSize) {
+    const [expectedWidth, expectedHeight] = expectedSize.split("x").map(value => Number(value));
+    if (expectedWidth && expectedHeight && (output.width !== expectedWidth || output.height !== expectedHeight)) {
+      return { approved: false, reason: "output review rejected unexpected dimensions" };
+    }
+  }
+  if (output.sizeBytes < 128) {
+    return { approved: false, reason: "output review rejected likely placeholder output" };
+  }
+  return { approved: true };
+}
+
+function outputBytesListFromSubmission(submission: { outputBytes?: Buffer; outputBytesList?: Buffer[] }) {
+  return submission.outputBytesList?.length
+    ? submission.outputBytesList
+    : submission.outputBytes
+      ? [submission.outputBytes]
+      : [];
+}
+
+async function scheduleGeneratedOutputCleanup(taskId: string, objectKey: string) {
+  const now = new Date().toISOString();
+  return getRepositories().image.createAssetCleanupJob({
+    id: `cleanup-${randomUUID()}`,
+    assetId: taskId,
+    objectKey,
+    reason: "soft_deleted",
+    scheduledAt: now,
+    createdAt: now
+  });
+}
+
+async function storeReviewAndFinalizeTask(task: ImageGenerationTask, submissionId: string, outputBytesList: Buffer[], userId?: string) {
+  const repositories = getRepositories();
+  await transitionTaskState(task.id, "storing", userId);
+  await repositories.image.createProviderResult({
+    id: `provider-result-${randomUUID()}`,
+    submissionId,
+    status: "succeeded",
+    rawPayloadDigest: createHash("sha256").update(Buffer.concat(outputBytesList)).digest("hex"),
+    outputMetadata: {
+      outputCount: outputBytesList.length
+    },
+    createdAt: new Date().toISOString()
+  });
+
+  const outputs: StoredGeneratedOutput[] = [];
+  const rejectedReasons: string[] = [];
+
+  for (const outputBytes of outputBytesList) {
+    try {
+      outputs.push(await storeGeneratedOutput({
+        task,
+        bytes: outputBytes
+      }));
+    } catch (error) {
+      const reason = error instanceof UploadValidationError
+        ? `output review rejected invalid provider output: ${error.message}`
+        : error instanceof Error
+          ? `output review rejected unstorable provider output: ${error.message}`
+          : "output review rejected unstorable provider output";
+      rejectedReasons.push(reason);
+    }
+  }
+
+  await transitionTaskState(task.id, "reviewing", userId);
+  const expectedSize = typeof task.requestPayload.size === "string" ? task.requestPayload.size : undefined;
+
+  const approvedOutputs: StoredGeneratedOutput[] = [];
+  const rejectedOutputs = new Set<string>();
+  for (const output of outputs) {
+    const review = await reviewStoredOutput(output, expectedSize);
+    if (!review.approved) {
+      rejectedReasons.push(review.reason || "output review rejected provider output");
+      rejectedOutputs.add(output.objectKey);
+    } else {
+      approvedOutputs.push(output);
+    }
+  }
+
+  if (rejectedReasons.length > 0 && approvedOutputs.length === 0) {
+    await Promise.all(outputs.map(output => scheduleGeneratedOutputCleanup(task.id, output.objectKey)));
+    return transitionTaskState(task.id, "failed", userId, { errorCode: "OUTPUT_REJECTED", errorMessage: rejectedReasons[0] || "output review rejected provider output" });
+  }
+
+  const approvedAssetIds: string[] = [];
+  for (const [index, output] of approvedOutputs.entries()) {
+    const approvedAsset = await createGeneratedAsset({
+      task,
+      title: approvedOutputs.length > 1 ? `${task.prompt.slice(0, 44) || "Generated asset"} #${index + 1}` : task.prompt.slice(0, 48) || "Generated asset",
+      output,
+      reviewStatus: "approved"
+    });
+    approvedAssetIds.push(approvedAsset.id);
+  }
+
+  if (rejectedReasons.length > 0) {
+    await Promise.all(outputs.filter(output => rejectedOutputs.has(output.objectKey)).map(output => scheduleGeneratedOutputCleanup(task.id, output.objectKey)));
+    if (task.creditHoldId) {
+      const spendAmount = Math.ceil(task.chargedCredits * (approvedOutputs.length / outputBytesList.length));
+      await settleCreditHoldPartially(task.creditHoldId, spendAmount);
+    }
+  }
+
+  await repositories.image.updateTask(task.id, { resultAssetIds: approvedAssetIds });
+  return transitionTaskState(task.id, "succeeded", userId);
+}
+
+async function continueAsyncImageTask(task: ImageGenerationTask, userId?: string) {
+  const providerSubmissionId = typeof task.requestPayload.providerSubmissionId === "string" ? task.requestPayload.providerSubmissionId : undefined;
+  const externalTaskId = typeof task.requestPayload.externalTaskId === "string" ? task.requestPayload.externalTaskId : undefined;
+  if (!providerSubmissionId || !externalTaskId) return task;
+
+  const submission = await pollImageGenerationResult({
+    provider: String(task.modelProvider),
+    modelName: task.modelName,
+    externalTaskId
+  });
+  const outputBytesList = outputBytesListFromSubmission(submission);
+  if (submission.providerMode !== "sync" || outputBytesList.length === 0) return task;
+
+  return storeReviewAndFinalizeTask(task, providerSubmissionId, outputBytesList, userId);
+}
+
+export async function runImageTask(taskId: string, userId?: string) {
+  const repositories = getRepositories();
+  const task = await getTask(taskId, userId);
+  if (!task) return undefined;
+
+  try {
+    if (task.status === "running" && task.requestPayload.providerMode === "async") {
+      return continueAsyncImageTask(task, userId);
+    }
+    if (task.status !== "queued") return task;
+
+    await transitionTaskState(task.id, "running", userId);
+    const submission = await submitImageGeneration({
+      taskType: task.taskType,
+      prompt: task.prompt,
+      negativePrompt: task.negativePrompt,
+      sourceAssetId: task.sourceAssetId,
+      size: typeof task.requestPayload.size === "string" ? task.requestPayload.size : "1024x1024",
+      count: typeof task.requestPayload.count === "number" ? task.requestPayload.count : 1
+    });
+    const submissionId = `submission-${task.id}`;
+    await repositories.image.createProviderSubmission({
+      id: submissionId,
+      taskId: task.id,
+      provider: submission.provider,
+      modelName: submission.modelName,
+      providerMode: submission.providerMode,
+      requestMetadata: {
+        externalTaskId: submission.externalTaskId,
+        estimatedDurationMs: submission.estimatedDurationMs,
+        hasSynchronousOutput: Boolean(submission.outputBytesList?.length || submission.outputBytes),
+        outputCount: submission.outputBytesList?.length || (submission.outputBytes ? 1 : 0),
+        taskType: task.taskType,
+        size: typeof task.requestPayload.size === "string" ? task.requestPayload.size : "1024x1024"
+      },
+      externalTaskId: submission.externalTaskId,
+      createdAt: new Date().toISOString()
+    });
+    await repositories.image.updateTask(task.id, {
+      requestPayload: {
+        ...task.requestPayload,
+        externalTaskId: submission.externalTaskId,
+        providerMode: submission.providerMode,
+        providerSubmissionId: submissionId
+      }
+    });
+
+    const outputBytesList = outputBytesListFromSubmission(submission);
+    if (submission.providerMode !== "sync" || outputBytesList.length === 0) {
+      const externalTaskId = String(submission.externalTaskId || task.id);
+      await repositories.image.createProviderResult({
+        id: `provider-result-${randomUUID()}`,
+        submissionId,
+        status: "pending",
+        rawPayloadDigest: createHash("sha256").update(externalTaskId).digest("hex"),
+        outputMetadata: {
+          externalTaskId,
+          providerMode: submission.providerMode
+        },
+        createdAt: new Date().toISOString()
+      });
+      return getTask(task.id, userId);
+    }
+
+    return storeReviewAndFinalizeTask(task, submissionId, outputBytesList, userId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "task runner failed";
+    return transitionTaskState(task.id, "failed", userId, { errorCode: "TASK_RUNNER_FAILED", errorMessage: message });
+  }
+}
+
+export async function deleteAsset(assetId: string, userId: string) {
+  const repositories = getRepositories();
+  const asset = await getAsset(assetId, userId);
+  if (!asset) return undefined;
+
+  const deletedAt = new Date().toISOString();
+  const deleted = await repositories.image.softDeleteAsset(asset.id, deletedAt);
+  if (!deleted) return undefined;
+
+  await repositories.image.createAssetCleanupJob({
+    id: `cleanup-${randomUUID()}`,
+    assetId: asset.id,
+    objectKey: asset.objectKey,
+    reason: "soft_deleted",
+    scheduledAt: deletedAt,
+    createdAt: deletedAt
+  });
+
+  return deleted;
+}
+
+const hdNoWatermarkDownloadCost = 5;
+
+async function activeMembershipCycle(userId: string) {
+  const now = Date.now();
+  return (await getRepositories().billing.listMembershipCycles(userId))
+    .filter(cycle => cycle.status === "active" && Date.parse(cycle.cycleStart) <= now && Date.parse(cycle.cycleEnd) > now)
+    .sort((left, right) => Date.parse(right.cycleEnd) - Date.parse(left.cycleEnd))[0];
+}
+
+export async function decideDownload(assetId: string, userId?: string): Promise<DownloadDecision> {
   const repositories = getRepositories();
   const [asset, account] = await Promise.all([
-    repositories.image.getAsset(assetId),
-    repositories.account.getCurrentAccount()
+    getAsset(assetId, userId),
+    repositories.account.getCurrentAccount(userId)
   ]);
 
   if (!asset) {
@@ -164,25 +482,109 @@ export async function decideDownload(assetId: string): Promise<DownloadDecision>
     };
   }
 
-  if (account.canDownloadHd && account.canDownloadWithoutWatermark) {
+  const activeCycle = account.memberStatus === "pro" ? await activeMembershipCycle(account.userId) : undefined;
+  if (activeCycle && activeCycle.hdDownloadsUsed < activeCycle.hdFairUseCap) {
     return {
       assetId,
       allowed: true,
       quality: "hd",
       watermark: false,
       costCredits: 0,
-      reason: "Pro 试用权益满足，可下载高清无水印版本",
+      reason: `Pro 本周期剩余 ${activeCycle.hdFairUseCap - activeCycle.hdDownloadsUsed} 次高清无水印下载额度`,
+      fairUseApplied: true,
       downloadUrl: asset.imageUrl
+    };
+  }
+
+  if (account.credits < hdNoWatermarkDownloadCost) {
+    return {
+      assetId,
+      allowed: false,
+      quality: "hd",
+      watermark: false,
+      costCredits: hdNoWatermarkDownloadCost,
+      reason: "高清无水印下载需要 5 credits，当前余额不足",
+      requiresPayment: true
     };
   }
 
   return {
     assetId,
     allowed: true,
-    quality: "standard",
-    watermark: true,
-    costCredits: 0,
-    reason: "免费权益仅支持带水印标清下载",
+    quality: "hd",
+    watermark: false,
+    costCredits: hdNoWatermarkDownloadCost,
+    reason: account.memberStatus === "pro" ? "本周期 Pro 免费额度已用完，本次高清无水印下载扣 5 credits" : "非 Pro 用户高清无水印下载扣 5 credits",
+    requiresPayment: true,
     downloadUrl: asset.imageUrl
   };
+}
+
+export async function confirmDownload(assetId: string, userId: string): Promise<DownloadDecision> {
+  const repositories = getRepositories();
+  const decision = await decideDownload(assetId, userId);
+  if (!decision.allowed) return decision;
+
+  const activeCycle = decision.fairUseApplied ? await activeMembershipCycle(userId) : undefined;
+  const now = new Date().toISOString();
+
+  try {
+    if (activeCycle && decision.costCredits === 0) {
+      const consumedCycle = await repositories.billing.consumeMembershipDownload(activeCycle.id, now);
+      if (!consumedCycle) {
+        const download = await repositories.billing.createDownloadEvent({
+          id: `download-${randomUUID()}`,
+          assetId,
+          userId,
+          downloadType: "hd_no_watermark",
+          creditCost: hdNoWatermarkDownloadCost,
+          proFairUseApplied: false,
+          membershipCycleId: activeCycle.id,
+          createdAt: now
+        });
+        await spendCreditsForDownload(userId, { downloadId: download.id, amount: hdNoWatermarkDownloadCost });
+        await repositories.image.updateAsset(assetId, { downloadState: "hd" });
+        return {
+          ...decision,
+          costCredits: hdNoWatermarkDownloadCost,
+          fairUseApplied: false,
+          reason: "本周期 Pro 免费额度已用完，本次高清无水印下载扣 5 credits"
+        };
+      }
+      await repositories.billing.createDownloadEvent({
+        id: `download-${randomUUID()}`,
+        assetId,
+        userId,
+        downloadType: "hd_no_watermark",
+        creditCost: 0,
+        proFairUseApplied: true,
+        membershipCycleId: activeCycle.id,
+        createdAt: now
+      });
+    } else if (decision.costCredits > 0) {
+      const download = await repositories.billing.createDownloadEvent({
+        id: `download-${randomUUID()}`,
+        assetId,
+        userId,
+        downloadType: "hd_no_watermark",
+        creditCost: decision.costCredits,
+        proFairUseApplied: false,
+        membershipCycleId: activeCycle?.id,
+        createdAt: now
+      });
+      await spendCreditsForDownload(userId, { downloadId: download.id, amount: decision.costCredits });
+    }
+    await repositories.image.updateAsset(assetId, { downloadState: "hd" });
+    return decision;
+  } catch (error) {
+    if (error instanceof CreditBalanceError || (error instanceof Error && error.message === "INSUFFICIENT_CREDITS")) {
+      return {
+        ...decision,
+        allowed: false,
+        requiresPayment: true,
+        reason: "高清无水印下载需要 5 credits，当前余额不足"
+      };
+    }
+    throw error;
+  }
 }

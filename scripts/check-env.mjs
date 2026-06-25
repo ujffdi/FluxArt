@@ -1,4 +1,5 @@
 const validExecutionModes = new Set(["mock", "live", undefined]);
+const validDataModes = new Set(["mock", "prisma", undefined]);
 
 function fail(message) {
   throw new Error(message);
@@ -24,28 +25,114 @@ function validateUrl(value, name) {
   }
 }
 
+function validateSecret(value, name, options = {}) {
+  if (!value) return;
+  if (value.length < (options.minLength || 24)) {
+    fail(`${name} must be at least ${options.minLength || 24} characters`);
+  }
+  if (/^(change-me|mock|test|secret|password|fluxart-local-session-secret)$/i.test(value)) {
+    fail(`${name} must not use a placeholder value`);
+  }
+}
+
+function validateMysqlUrl(value, name) {
+  if (!value) return;
+  try {
+    const url = new URL(value);
+    if (!["mysql:", "mysql2:"].includes(url.protocol)) {
+      fail(`${name} must use mysql:// or mysql2://`);
+    }
+    if (!url.username || !url.hostname || !url.pathname || url.pathname === "/") {
+      fail(`${name} must include username, host, and database name`);
+    }
+  } catch {
+    fail(`${name} must be a valid MySQL connection URL`);
+  }
+}
+
+function requireWhenProduction(value, name, mode) {
+  if ((mode === "prisma" || process.env.NODE_ENV === "production") && !value) {
+    fail(`${name} is required when FLUXART_DATA_MODE=prisma or NODE_ENV=production`);
+  }
+}
+
 function run() {
   const executionMode = process.env.IMAGE_MODEL_EXECUTION;
+  const dataMode = process.env.FLUXART_DATA_MODE || process.env.APP_DATA_MODE;
   const provider = process.env.IMAGE_MODEL_PROVIDER || "openai";
   const model = process.env.OPENAI_IMAGE_MODEL || process.env.IMAGE_MODEL_NAME || "gpt-image-2";
   const baseUrl = process.env.IMAGE_MODEL_BASE_URL || "https://api.openai.com/v1";
   const apiKeySecretRef = process.env.IMAGE_MODEL_API_KEY_SECRET_REF || "OPENAI_API_KEY";
+  const minioEndpoint = process.env.MINIO_ENDPOINT;
+  const minioPublicBaseUrl = process.env.MINIO_PUBLIC_BASE_URL;
+  const epayApiUrl = process.env.EPAY_API_URL;
+  const sessionSecret = process.env.FLUXART_SESSION_SECRET;
+  const epayNotifyUrl = process.env.EPAY_NOTIFY_URL;
+  const epayReturnUrl = process.env.EPAY_RETURN_URL;
 
   if (!validExecutionModes.has(executionMode)) {
     fail("IMAGE_MODEL_EXECUTION must be either mock or live");
   }
 
+  if (!validDataModes.has(dataMode)) {
+    fail("FLUXART_DATA_MODE must be either mock or prisma");
+  }
+
+  if (process.env.NODE_ENV === "production" && dataMode !== "prisma") {
+    fail("NODE_ENV=production requires FLUXART_DATA_MODE=prisma");
+  }
+
+  if (dataMode === "prisma" && !process.env.DATABASE_URL) {
+    fail("FLUXART_DATA_MODE=prisma or NODE_ENV=production requires DATABASE_URL");
+  }
+
+  validateMysqlUrl(process.env.DATABASE_URL, "DATABASE_URL");
+  requireWhenProduction(minioEndpoint, "MINIO_ENDPOINT", dataMode);
+  requireWhenProduction(process.env.MINIO_BUCKET, "MINIO_BUCKET", dataMode);
+  requireWhenProduction(process.env.MINIO_ACCESS_KEY, "MINIO_ACCESS_KEY", dataMode);
+  requireWhenProduction(process.env.MINIO_SECRET_KEY, "MINIO_SECRET_KEY", dataMode);
+  requireWhenProduction(minioPublicBaseUrl, "MINIO_PUBLIC_BASE_URL", dataMode);
+  requireWhenProduction(sessionSecret, "FLUXART_SESSION_SECRET", dataMode);
+  requireWhenProduction(epayApiUrl, "EPAY_API_URL", dataMode);
+  requireWhenProduction(process.env.EPAY_MERCHANT_ID, "EPAY_MERCHANT_ID", dataMode);
+  requireWhenProduction(process.env.EPAY_SIGNING_SECRET, "EPAY_SIGNING_SECRET", dataMode);
+  requireWhenProduction(epayNotifyUrl, "EPAY_NOTIFY_URL", dataMode);
+  requireWhenProduction(epayReturnUrl, "EPAY_RETURN_URL", dataMode);
+
   validateUrl(baseUrl, "IMAGE_MODEL_BASE_URL");
+  validateUrl(minioEndpoint, "MINIO_ENDPOINT");
+  validateUrl(minioPublicBaseUrl, "MINIO_PUBLIC_BASE_URL");
+  validateUrl(epayApiUrl, "EPAY_API_URL");
+  validateUrl(epayNotifyUrl, "EPAY_NOTIFY_URL");
+  validateUrl(epayReturnUrl, "EPAY_RETURN_URL");
+  validateSecret(sessionSecret, "FLUXART_SESSION_SECRET", { minLength: 32 });
+  validateSecret(process.env.MINIO_SECRET_KEY, "MINIO_SECRET_KEY", { minLength: 16 });
+  validateSecret(process.env.EPAY_SIGNING_SECRET, "EPAY_SIGNING_SECRET", { minLength: 16 });
 
   if (executionMode === "live" && !process.env[apiKeySecretRef]) {
     fail(`IMAGE_MODEL_EXECUTION=live requires ${apiKeySecretRef}`);
   }
+  if (executionMode === "live") validateSecret(process.env[apiKeySecretRef], apiKeySecretRef, { minLength: 8 });
 
-  if (provider !== "openai" && baseUrl === "https://api.openai.com/v1") {
-    warn("custom provider is using the default OpenAI base URL; set IMAGE_MODEL_BASE_URL for a custom endpoint");
+  if (provider !== "openai" && executionMode === "live") {
+    if (!process.env.IMAGE_MODEL_NAME || model === "gpt-image-2") {
+      fail("live custom providers require IMAGE_MODEL_NAME");
+    }
+    if (!process.env.IMAGE_MODEL_BASE_URL || baseUrl === "https://api.openai.com/v1") {
+      fail("live custom providers require a custom IMAGE_MODEL_BASE_URL");
+    }
+    if (!process.env.IMAGE_MODEL_API_KEY_SECRET_REF || apiKeySecretRef === "OPENAI_API_KEY") {
+      fail("live custom providers require IMAGE_MODEL_API_KEY_SECRET_REF that references the custom provider secret");
+    }
+  } else if (provider !== "openai" && baseUrl === "https://api.openai.com/v1") {
+    warn("custom provider is using the default OpenAI base URL; set IMAGE_MODEL_BASE_URL for a custom endpoint before live execution");
   }
 
-  ok(`execution=${executionMode || "mock"} provider=${provider} model=${model} baseUrl=${baseUrl} keyRef=${apiKeySecretRef}`);
+  if (!minioEndpoint) warn("MINIO_ENDPOINT is not set; asset storage remains in local mock mode");
+  if (!epayApiUrl) warn("EPAY_API_URL is not set; payment adapter remains in local mock mode");
+  if (!sessionSecret) warn("FLUXART_SESSION_SECRET is not set; local session hashes use a development-only fallback");
+
+  ok(`data=${dataMode || "mock"} execution=${executionMode || "mock"} provider=${provider} model=${model} baseUrl=${baseUrl} keyRef=${apiKeySecretRef}`);
 }
 
 try {

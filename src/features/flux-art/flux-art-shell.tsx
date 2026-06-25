@@ -1,21 +1,27 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Brush, Eraser, Eye, Undo2 } from "lucide-react";
 import {
   ApiClientError,
   createBillingOrder,
+  deleteImageAsset,
   createDownloadDecision,
   createImageTask,
   getAccountCredits,
   getAccountMembership,
+  getCurrentAuthSession,
+  listBillingOrders,
   listImageAssets,
-  listImageTasks
+  listImageTasks,
+  loginWithPassword,
+  logoutCurrentSession,
+  registerAccount
 } from "@/features/flux-art/api/image-workspace-client";
-import { account as demoAccount, assets as demoAssets, tasks as demoTasks, versionNodes as demoVersionNodes } from "@/features/flux-art/data/demo-data";
-import { toTaskType, type ProductPage, useImageWorkspaceStore } from "@/stores/image-workspace-store";
-import type { BillingPlanId } from "@/types/billing";
+import { toTaskType, type ProductPage, useImageWorkspaceStore } from "@/features/flux-art/stores/image-workspace-store";
+import type { AuthAccount } from "@/types/auth";
+import type { BillingOrder, BillingPlanId } from "@/types/billing";
 import type {
   AccountCreditsSummary,
   AccountMembershipSummary,
@@ -61,8 +67,7 @@ const assetStatusOptions: Array<{ value: "" | AssetStatus; label: string }> = [
   { value: "succeeded", label: "成功" },
   { value: "reviewing", label: "审核中" },
   { value: "processing", label: "生成中" },
-  { value: "failed", label: "失败" },
-  { value: "insufficient_credits", label: "权益不足" }
+  { value: "failed", label: "失败" }
 ];
 
 function errorMessage(error: unknown, fallback: string) {
@@ -71,14 +76,45 @@ function errorMessage(error: unknown, fallback: string) {
   return fallback;
 }
 
+function workspaceErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof ApiClientError) {
+    const messages: Record<string, string> = {
+      AUTH_REQUIRED: "请先登录后继续。",
+      INSUFFICIENT_CREDITS: "积分不足，请购买额度或等待免费额度刷新。",
+      TASK_LIMIT_REACHED: "当前队列已满，请等待已有任务完成后再提交。",
+      TASK_CAPABILITY_REQUIRED: "当前会员权益不支持这个任务类型。",
+      TASK_STATE_TRANSITION_INVALID: "任务状态已变化，请刷新后重试。"
+    };
+    return error.errorCode ? messages[error.errorCode] || error.message : error.message;
+  }
+  return errorMessage(error, fallback);
+}
+
 function memberStatusLabel(status: AccountMembershipSummary["memberStatus"]) {
   const labels: Record<AccountMembershipSummary["memberStatus"], string> = {
     free: "免费用户",
-    points: "点数包用户",
+    credit_pack: "积分额度用户",
     pro_trial: "Pro 试用",
     pro: "Pro 用户"
   };
   return labels[status];
+}
+
+function billingPlanLabel(planId: BillingPlanId) {
+  const labels: Record<BillingPlanId, string> = {
+    "credits-500": "500 credits",
+    "credits-1500": "1,500 credits",
+    "credits-5000": "5,000 credits",
+    "pro-monthly": "Pro 月度会员"
+  };
+  return labels[planId];
+}
+
+function orderStatusLabel(order: BillingOrder) {
+  if (order.fulfillmentStatus === "fulfilled") return "已履约";
+  if (order.fulfillmentStatus === "retryable" || order.status === "failed") return "可重试";
+  if (order.status === "paid") return "已支付";
+  return "待支付";
 }
 
 export function FluxArtShell({ activePage, initialAssetId }: { activePage: ProductPage; initialAssetId?: string }) {
@@ -87,50 +123,79 @@ export function FluxArtShell({ activePage, initialAssetId }: { activePage: Produ
   const [authModal, setAuthModal] = useState<string | null>(null);
   const [showLogout, setShowLogout] = useState(false);
   const [sessionTasks, setSessionTasks] = useState<ImageGenerationTask[]>([]);
-  const [serverAssets, setServerAssets] = useState<ImageAsset[]>(demoAssets);
-  const [serverVersionNodes, setServerVersionNodes] = useState<AssetVersionNode[]>(demoVersionNodes);
-  const [serverTasks, setServerTasks] = useState<ImageGenerationTask[]>(demoTasks);
+  const [serverAssets, setServerAssets] = useState<ImageAsset[]>([]);
+  const [serverVersionNodes, setServerVersionNodes] = useState<AssetVersionNode[]>([]);
+  const [serverTasks, setServerTasks] = useState<ImageGenerationTask[]>([]);
   const [creditsSummary, setCreditsSummary] = useState<AccountCreditsSummary | null>(null);
   const [membershipSummary, setMembershipSummary] = useState<AccountMembershipSummary | null>(null);
+  const [billingOrders, setBillingOrders] = useState<BillingOrder[]>([]);
+  const [authAccount, setAuthAccount] = useState<AuthAccount | null>(null);
   const [serverError, setServerError] = useState("");
 
-  const credits = creditsSummary?.credits ?? demoAccount.credits;
-  const proDaysRemaining = membershipSummary?.proDaysRemaining ?? demoAccount.proDaysRemaining;
-  const memberStatus = membershipSummary?.memberStatus ?? demoAccount.memberStatus;
+  const credits = creditsSummary?.credits ?? 0;
+  const proDaysRemaining = membershipSummary?.proDaysRemaining ?? 0;
+  const memberStatus = membershipSummary?.memberStatus ?? "free";
+  const hasServerSession = authAccount !== null;
+  const sessionState = hasServerSession ? "logged-in" : store.sessionState === "expired" ? "expired" : "guest";
 
   const selectedAsset = useMemo(
-    () => serverAssets.find(asset => asset.id === store.selectedAssetId) || demoAssets.find(asset => asset.id === store.selectedAssetId) || serverAssets[0] || demoAssets[0],
+    () => serverAssets.find(asset => asset.id === store.selectedAssetId) || serverAssets[0],
     [serverAssets, store.selectedAssetId]
   );
 
   useEffect(() => {
-    if (initialAssetId && [...serverAssets, ...demoAssets].some(asset => asset.id === initialAssetId)) {
+    if (initialAssetId && serverAssets.some(asset => asset.id === initialAssetId)) {
       useImageWorkspaceStore.getState().setSelectedAssetId(initialAssetId);
     }
   }, [initialAssetId, serverAssets]);
+
+  const clearSessionOwnedState = useCallback(function clearSessionOwnedState() {
+    setAuthAccount(null);
+    setServerAssets([]);
+    setServerVersionNodes([]);
+    setServerTasks([]);
+    setSessionTasks([]);
+    setCreditsSummary(null);
+    setMembershipSummary(null);
+    setBillingOrders([]);
+  }, []);
+
+  const loadSessionOwnedState = useCallback(async function loadSessionOwnedState(account?: AuthAccount) {
+    const auth = account ? { account } : await getCurrentAuthSession();
+
+    const [assetPayload, taskPayload, creditsPayload, membershipPayload, ordersPayload] = await Promise.all([
+      listImageAssets({ page: 1, pageSize: 100 }),
+      listImageTasks({ page: 1, pageSize: 20 }),
+      getAccountCredits(),
+      getAccountMembership(),
+      listBillingOrders()
+    ]);
+
+    setServerAssets(assetPayload.assets);
+    setServerVersionNodes(assetPayload.versionNodes);
+    setServerTasks(taskPayload.tasks);
+    setCreditsSummary(creditsPayload);
+    setMembershipSummary(membershipPayload);
+    setBillingOrders(ordersPayload);
+    setAuthAccount(auth.account);
+    useImageWorkspaceStore.getState().setSessionState("logged-in");
+    setServerError("");
+  }, []);
 
   useEffect(() => {
     let active = true;
 
     async function loadServerState() {
       try {
-        const [assetPayload, taskPayload, creditsPayload, membershipPayload] = await Promise.all([
-          listImageAssets({ page: 1, pageSize: 100 }),
-          listImageTasks({ page: 1, pageSize: 20 }),
-          getAccountCredits(),
-          getAccountMembership()
-        ]);
-
+        await loadSessionOwnedState();
         if (!active) return;
-        setServerAssets(assetPayload.assets);
-        setServerVersionNodes(assetPayload.versionNodes);
-        setServerTasks(taskPayload.tasks);
-        setCreditsSummary(creditsPayload);
-        setMembershipSummary(membershipPayload);
-        setServerError("");
       } catch (error) {
         if (!active) return;
-        setServerError(errorMessage(error, "API 数据暂不可用，已使用本地演示数据"));
+        if (error instanceof ApiClientError && error.status === 401) {
+          clearSessionOwnedState();
+          useImageWorkspaceStore.getState().setSessionState("guest");
+        }
+        setServerError(errorMessage(error, "请登录后加载你的资产、任务和权益数据"));
       }
     }
 
@@ -139,7 +204,7 @@ export function FluxArtShell({ activePage, initialAssetId }: { activePage: Produ
     return () => {
       active = false;
     };
-  }, []);
+  }, [clearSessionOwnedState, loadSessionOwnedState]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = store.theme;
@@ -164,7 +229,7 @@ export function FluxArtShell({ activePage, initialAssetId }: { activePage: Produ
   }, []);
 
   function requireAuth(action: string, done: () => void) {
-    if (store.sessionState !== "logged-in") {
+    if (!hasServerSession) {
       setAuthModal(action);
       return;
     }
@@ -173,6 +238,11 @@ export function FluxArtShell({ activePage, initialAssetId }: { activePage: Produ
 
   async function createGenerationTask() {
     requireAuth("生成图片", async () => {
+      if (store.generationMode === "img" && !selectedAsset) {
+        store.showToast("请先从你的资产中心选择参考图");
+        return;
+      }
+
       try {
         const task = await createImageTask({
           taskType: toTaskType(store.generationMode),
@@ -180,19 +250,24 @@ export function FluxArtShell({ activePage, initialAssetId }: { activePage: Produ
           negativePrompt: store.generationMode === "img" ? undefined : "低清晰度、畸变、文字水印",
           sourceAssetId: store.generationMode === "img" ? store.selectedAssetId : undefined,
           size: "1024x1024",
-          count: 4,
+          count: store.generationCount,
           stylePreset: "商业摄影"
         });
         setSessionTasks(current => [task, ...current]);
         store.showToast(`任务已提交：${task.modelProvider}/${task.modelName} · ${task.id}`);
       } catch (error) {
-        store.showToast(`任务提交失败：${errorMessage(error, "请稍后重试")}`);
+        store.showToast(`任务提交失败：${workspaceErrorMessage(error, "请稍后重试")}`);
       }
     });
   }
 
   async function createEditTask() {
     requireAuth("生成新资产", async () => {
+      if (!selectedAsset) {
+        store.showToast("请先从你的资产中心选择要编辑的图片");
+        return;
+      }
+
       try {
         const task = await createImageTask({
           taskType: toTaskType("txt", store.editMode),
@@ -202,13 +277,18 @@ export function FluxArtShell({ activePage, initialAssetId }: { activePage: Produ
         setSessionTasks(current => [task, ...current]);
         store.showToast(`编辑任务已提交：${task.id}，结果会生成新资产`);
       } catch (error) {
-        store.showToast(`编辑任务提交失败：${errorMessage(error, "请稍后重试")}`);
+        store.showToast(`编辑任务提交失败：${workspaceErrorMessage(error, "请稍后重试")}`);
       }
     });
   }
 
   async function openDownload(assetId = store.selectedAssetId) {
     requireAuth("下载无水印", async () => {
+      if (!selectedAsset && !assetId) {
+        store.showToast("请先选择要下载的图片");
+        return;
+      }
+
       try {
         const decision = await createDownloadDecision(assetId);
         setDownloadDecision(decision);
@@ -218,34 +298,84 @@ export function FluxArtShell({ activePage, initialAssetId }: { activePage: Produ
     });
   }
 
+  async function removeAsset(assetId = store.selectedAssetId) {
+    requireAuth("删除资产", async () => {
+      try {
+        await deleteImageAsset(assetId);
+        setServerAssets(current => {
+          const next = current.filter(asset => asset.id !== assetId);
+          if (store.selectedAssetId === assetId && next[0]) {
+            store.setSelectedAssetId(next[0].id);
+          }
+          return next;
+        });
+        store.showToast("资产已删除：服务端会按保留策略清理对象");
+      } catch (error) {
+        store.showToast(`删除失败：${errorMessage(error, "请稍后重试")}`);
+      }
+    });
+  }
+
   async function createOrder(planId: BillingPlanId) {
     requireAuth("购买权益", async () => {
       try {
-        await createBillingOrder(planId);
-        store.showToast("订单已创建：当前为支付占位，权益将在支付后生效");
+        const order = await createBillingOrder(planId);
+        setBillingOrders(current => [order, ...current.filter(item => item.orderId !== order.orderId)]);
+        store.showToast("订单已创建：正在进入支付流程");
+        if (order.paymentUrl) window.location.assign(order.paymentUrl);
       } catch (error) {
         store.showToast(`订单创建失败：${errorMessage(error, "请稍后重试")}`);
       }
     });
   }
 
-  function setSession(state: "logged-in" | "guest" | "expired") {
-    store.setSessionState(state);
-    if (state === "logged-in") store.showToast("登录成功：已恢复 Prompt、尺寸和编辑草稿");
-    if (state === "guest") store.showToast("已切换为游客态：生成、下载、保存和购买会触发登录拦截");
-    if (state === "expired") setAuthModal("恢复登录");
+  async function refreshSessionState() {
+    try {
+      const auth = await getCurrentAuthSession();
+      await loadSessionOwnedState(auth.account);
+      store.showToast("登录状态已刷新");
+    } catch (error) {
+      clearSessionOwnedState();
+      store.setSessionState("guest");
+      store.showToast(`登录状态无效：${errorMessage(error, "请重新登录")}`);
+    }
+  }
+
+  async function submitAuthCredentials(input: { mode: "login" | "register"; username: string; password: string; displayName?: string }) {
+    try {
+      const auth = input.mode === "register"
+        ? await registerAccount(input.username, input.password, input.displayName)
+        : await loginWithPassword(input.username, input.password);
+      await loadSessionOwnedState(auth.account);
+      setAuthModal(null);
+      store.showToast("登录成功：已恢复 Prompt、尺寸和编辑草稿");
+    } catch (error) {
+      store.showToast(`登录失败：${errorMessage(error, "请稍后重试")}`);
+    }
+  }
+
+  async function logoutSession() {
+    try {
+      await logoutCurrentSession();
+    } catch {
+      // A failed logout request still clears local presentation state.
+    }
+    setShowLogout(false);
+    clearSessionOwnedState();
+    store.setSessionState("guest");
+    store.showToast("已退出当前 session");
   }
 
   return (
     <main className="app">
       <Header
         activePage={activePage}
-        sessionLabel={store.sessionState === "logged-in" ? `已登录 · ${demoAccount.displayName}` : store.sessionState === "expired" ? "登录已过期" : "游客模式"}
+        sessionLabel={hasServerSession ? `已登录 · ${authAccount.displayName || "Flux Art 用户"}` : sessionState === "expired" ? "登录已过期" : "游客模式"}
         credits={credits}
         memberLabel={memberStatusLabel(memberStatus)}
         theme={store.theme}
         onToggleTheme={() => store.setTheme(store.theme === "light" ? "dark" : "light")}
-        onAuthClick={() => (store.sessionState === "logged-in" ? setShowLogout(true) : setAuthModal(""))}
+        onAuthClick={() => (hasServerSession ? setShowLogout(true) : setAuthModal(""))}
       />
 
       <Overview />
@@ -255,9 +385,11 @@ export function FluxArtShell({ activePage, initialAssetId }: { activePage: Produ
           generationMode={store.generationMode}
           referenceStrength={store.referenceStrength}
           customSizeVisible={store.customSizeVisible}
+          generationCount={store.generationCount}
           onModeChange={store.setGenerationMode}
           onReferenceStrengthChange={store.setReferenceStrength}
           onCustomSizeChange={store.setCustomSizeVisible}
+          onGenerationCountChange={store.setGenerationCount}
           onGenerate={createGenerationTask}
           onOpenBilling={() => store.showToast("权益页面包含积分、Pro 和下载权限承接")}
           onShortcutToImageMode={() => {
@@ -277,7 +409,7 @@ export function FluxArtShell({ activePage, initialAssetId }: { activePage: Produ
 
       {activePage === "edit" && (
         <EditPage
-          selectedAssetId={selectedAsset.id}
+          selectedAssetId={selectedAsset?.id || store.selectedAssetId}
           editMode={store.editMode}
           paintStrength={store.paintStrength}
           onEditModeChange={store.setEditMode}
@@ -288,11 +420,13 @@ export function FluxArtShell({ activePage, initialAssetId }: { activePage: Produ
 
       {activePage === "assets" && (
         <AssetsPage
+          key={authAccount?.userId || "guest"}
           selectedAssetId={store.selectedAssetId}
           initialAssets={serverAssets}
           initialVersionNodes={serverVersionNodes}
           onSelectAsset={store.setSelectedAssetId}
           onDownload={openDownload}
+          onDelete={removeAsset}
           onImageToImage={() => {
             store.setGenerationMode("img");
             store.showToast("已切换到图生图：历史资产已作为 sourceAssetId");
@@ -304,26 +438,20 @@ export function FluxArtShell({ activePage, initialAssetId }: { activePage: Produ
         />
       )}
 
-      {activePage === "account" && <AccountPage credits={credits} memberStatus={memberStatus} proDaysRemaining={proDaysRemaining} onSetSession={setSession} />}
-      {activePage === "billing" && <BillingPage credits={credits} memberStatus={memberStatus} proDaysRemaining={proDaysRemaining} onCreateOrder={createOrder} />}
+      {activePage === "account" && <AccountPage account={authAccount} credits={credits} membership={membershipSummary} memberStatus={memberStatus} proDaysRemaining={proDaysRemaining} sessionState={sessionState} onRefreshSession={refreshSessionState} onLogout={logoutSession} />}
+      {activePage === "billing" && <BillingPage credits={credits} memberStatus={memberStatus} proDaysRemaining={proDaysRemaining} includedHdDownloadsRemaining={membershipSummary?.includedHdDownloadsRemaining} orders={billingOrders} onCreateOrder={createOrder} />}
 
       <DownloadModal decision={downloadDecision} onClose={() => setDownloadDecision(null)} />
       <AuthModal
         action={authModal}
         open={authModal !== null}
         onClose={() => setAuthModal(null)}
-        onLogin={() => {
-          setAuthModal(null);
-          setSession("logged-in");
-        }}
+        onSubmit={submitAuthCredentials}
       />
       <LogoutModal
         open={showLogout}
         onCancel={() => setShowLogout(false)}
-        onConfirm={() => {
-          setShowLogout(false);
-          setSession("guest");
-        }}
+        onConfirm={logoutSession}
       />
       <div className={`toast ${store.toast ? "show" : ""}`} role="status" aria-live="polite">{store.toast}</div>
     </main>
@@ -403,9 +531,11 @@ function WorkspacePage({
   generationMode,
   referenceStrength,
   customSizeVisible,
+  generationCount,
   onModeChange,
   onReferenceStrengthChange,
   onCustomSizeChange,
+  onGenerationCountChange,
   onGenerate,
   onOpenBilling,
   onShortcutToImageMode,
@@ -418,9 +548,11 @@ function WorkspacePage({
   generationMode: "txt" | "img";
   referenceStrength: number;
   customSizeVisible: boolean;
+  generationCount: number;
   onModeChange: (mode: "txt" | "img") => void;
   onReferenceStrengthChange: (value: number) => void;
   onCustomSizeChange: (visible: boolean) => void;
+  onGenerationCountChange: (count: number) => void;
   onGenerate: () => void;
   onOpenBilling: () => void;
   onShortcutToImageMode: () => void;
@@ -441,7 +573,7 @@ function WorkspacePage({
       </div>
       <section className="workspace-grid">
         <aside className="panel">
-          <div className="panel-head"><h2>{imageMode ? "图生图参数" : "文生图参数"}</h2><span className="badge">预计 {imageMode ? 32 : 18} 积分</span></div>
+          <div className="panel-head"><h2>{imageMode ? "图生图参数" : "文生图参数"}</h2><span className="badge">预计 {imageMode ? 60 : 40} 积分</span></div>
           <div className="panel-body">
             {imageMode && <UploadField />}
             <div className="field"><label>{imageMode ? "修改方向说明" : "Prompt"}</label><textarea aria-label={imageMode ? "修改方向说明" : "Prompt"} defaultValue={imageMode ? "保持源图主体结构，生成更适合电商详情页的高级商业摄影版本" : "一张用于电商主图的现代香薰产品摄影，暗色背景，柔和边缘光，真实材质，高级商业摄影"} /></div>
@@ -455,10 +587,10 @@ function WorkspacePage({
             <div className="field"><label>风格预设</label><div className="chips"><span className="chip active">商业摄影</span><span className="chip">电商海报</span><span className="chip">极简产品</span><span className="chip">室内空间</span></div></div>
             <div className="row">
               <div className="field"><label>尺寸</label><select className="select" aria-label="尺寸" onChange={event => onCustomSizeChange(event.target.value === "custom")}><option>1024 x 1024</option><option>1344 x 768</option><option>768 x 1344</option><option value="custom">手动输入</option></select></div>
-              <div className="field"><label>数量</label><select className="select" aria-label="数量"><option>4 张</option><option>2 张</option><option>1 张</option></select></div>
+              <div className="field"><label>数量</label><select className="select" aria-label="数量" value={generationCount} onChange={event => onGenerationCountChange(Number(event.target.value))}><option value={4}>4 张</option><option value={2}>2 张</option><option value={1}>1 张</option></select></div>
             </div>
             {customSizeVisible && <div className="field"><label>手动尺寸</label><div className="size-custom"><input className="input" type="number" aria-label="手动宽度" min="512" max="2048" step="64" defaultValue="1024" /><input className="input" type="number" aria-label="手动高度" min="512" max="2048" step="64" defaultValue="1024" /></div><span className="small">支持 512-2048px，建议使用 64 的倍数。</span></div>}
-            <div className="cost"><span>预计消耗 / 当前余额</span><strong>{imageMode ? "32" : "18"} / {credits.toLocaleString()} 积分</strong></div>
+            <div className="cost"><span>预计消耗 / 当前余额</span><strong>{imageMode ? "60" : "40"} / {credits.toLocaleString()} 积分</strong></div>
             <button className="btn primary full" type="button" onClick={onGenerate}>生成图片</button>
           </div>
         </aside>
@@ -508,7 +640,7 @@ function AsideTasks({ onShortcutToImageMode, sessionTasks, serverTasks, serverEr
       <div className="panel-head"><h2>任务与继续编辑</h2><span className="badge">状态映射</span></div>
       <div className="panel-body recent">
         {serverError && <div className="api-state bad">{serverError}</div>}
-        {visibleTasks.map(task => <div className="task" key={task.id}><strong>{task.status} · {task.id}</strong><span>{task.prompt}</span><p className="code">model={task.modelProvider}/{task.modelName} · chargedCredits={task.chargedCredits}</p>{task.status === "processing" && <div className="bar"><span /></div>}</div>)}
+        {visibleTasks.map(task => <div className="task" key={task.id}><strong>{task.status} · {task.id}</strong><span>{task.prompt}</span><p className="code">model={task.modelProvider}/{task.modelName} · chargedCredits={task.chargedCredits}</p>{(task.status === "running" || task.status === "storing") && <div className="bar"><span /></div>}</div>)}
         <div className="task"><strong>failed · Prompt 合规拦截</strong><span>原因：包含受限品牌商标描述，请修改后重试。</span><button className="btn" type="button">修改 Prompt</button></div>
         <div className="history"><span className="thumb" /><div><strong>局部重绘 / 扩图入口</strong><span className="small">需先从结果图或资产中心选择 sourceAssetId。</span></div></div>
         <button className="btn" type="button" onClick={onShortcutToImageMode}>选择历史资产后继续编辑</button>
@@ -557,6 +689,7 @@ function AssetsPage({
   initialVersionNodes,
   onSelectAsset,
   onDownload,
+  onDelete,
   onImageToImage,
   onOpenEdit
 }: {
@@ -565,17 +698,20 @@ function AssetsPage({
   initialVersionNodes: AssetVersionNode[];
   onSelectAsset: (assetId: string) => void;
   onDownload: (assetId?: string) => void;
+  onDelete: (assetId?: string) => void;
   onImageToImage: () => void;
   onOpenEdit: (mode: "inpaint" | "outpaint") => void;
 }) {
-  const [visibleAssets, setVisibleAssets] = useState(initialAssets);
-  const [visibleVersionNodes, setVisibleVersionNodes] = useState(initialVersionNodes);
+  const [filteredAssets, setFilteredAssets] = useState<ImageAsset[] | null>(null);
+  const [filteredVersionNodes, setFilteredVersionNodes] = useState<AssetVersionNode[] | null>(null);
   const [pagination, setPagination] = useState<PaginationMeta | null>(null);
   const [query, setQuery] = useState("");
   const [taskType, setTaskType] = useState<"" | GenerationMode>("");
   const [status, setStatus] = useState<"" | AssetStatus>("");
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const visibleAssets = filteredAssets || initialAssets;
+  const visibleVersionNodes = filteredVersionNodes || initialVersionNodes;
   const selected = visibleAssets.find(asset => asset.id === selectedAssetId) || initialAssets.find(asset => asset.id === selectedAssetId) || visibleAssets[0] || initialAssets[0];
 
   useEffect(() => {
@@ -594,13 +730,17 @@ function AssetsPage({
       try {
         const payload = await listImageAssets(filters);
         if (!active) return;
-        setVisibleAssets(payload.assets);
-        setVisibleVersionNodes(payload.versionNodes);
+        setFilteredAssets(payload.assets);
+        setFilteredVersionNodes(payload.versionNodes);
         setPagination(payload.pagination);
         setLoadError("");
       } catch (error) {
         if (!active) return;
-        setLoadError(errorMessage(error, "资产列表加载失败，已保留本地数据"));
+        if (error instanceof ApiClientError && error.status === 401) {
+          setFilteredAssets([]);
+          setFilteredVersionNodes([]);
+        }
+        setLoadError(errorMessage(error, "请登录后查看你的资产列表"));
       } finally {
         if (active) setLoading(false);
       }
@@ -613,7 +753,14 @@ function AssetsPage({
     };
   }, [query, taskType, status]);
 
-  if (!selected) return null;
+  if (!selected) {
+    return (
+      <section aria-label="图片资产中心">
+        <div className="empty-card">登录后可查看你的资产、版本链和下载权限。</div>
+        {loadError && <div className="api-state bad">{loadError}</div>}
+      </section>
+    );
+  }
 
   return (
     <section aria-label="图片资产中心">
@@ -640,7 +787,8 @@ function AssetsPage({
           <h2>{selected.title}</h2>
           <div className="preview-img" style={{ backgroundImage: `linear-gradient(135deg, rgba(124, 92, 255, 0.3), rgba(24, 214, 194, 0.13)), url(${selected.imageUrl})` }} />
           <p className="small">{selected.id} · {selected.taskType} · {selected.status} · 来源任务 {selected.taskId}</p>
-          <div className="actions"><button className="btn primary" type="button" onClick={() => onDownload(selected.id)}>下载</button><Link className="btn" href="/workspace/image" onClick={onImageToImage}>继续图生图</Link><Link className="btn" href={`/workspace/image/edit/${selected.id}`} onClick={() => onOpenEdit("inpaint")}>带入局部重绘</Link><Link className="btn" href={`/workspace/image/edit/${selected.id}`} onClick={() => onOpenEdit("outpaint")}>带入扩图</Link></div>
+          {selected.commercialAuthorizationStatement && <p className="notice">{selected.commercialAuthorizationStatement}</p>}
+          <div className="actions"><button className="btn primary" type="button" onClick={() => onDownload(selected.id)}>下载</button><Link className="btn" href="/workspace/image" onClick={onImageToImage}>继续图生图</Link><Link className="btn" href={`/workspace/image/edit/${selected.id}`} onClick={() => onOpenEdit("inpaint")}>带入局部重绘</Link><Link className="btn" href={`/workspace/image/edit/${selected.id}`} onClick={() => onOpenEdit("outpaint")}>带入扩图</Link><button className="btn" type="button" onClick={() => onDelete(selected.id)}>删除</button></div>
           <div className="timeline"><strong>版本链</strong>{visibleVersionNodes.map(node => <div className="node" key={node.id}><span className="dot" /><div className="rel">{node.label}</div></div>)}</div>
         </aside>
       </section>
@@ -648,72 +796,176 @@ function AssetsPage({
   );
 }
 
-function AccountPage({ credits, memberStatus, proDaysRemaining, onSetSession }: { credits: number; memberStatus: AccountMembershipSummary["memberStatus"]; proDaysRemaining: number; onSetSession: (state: "logged-in" | "guest" | "expired") => void }) {
+function AccountPage({
+  account,
+  credits,
+  membership,
+  memberStatus,
+  proDaysRemaining,
+  sessionState,
+  onRefreshSession,
+  onLogout
+}: {
+  account: AuthAccount | null;
+  credits: number;
+  membership: AccountMembershipSummary | null;
+  memberStatus: AccountMembershipSummary["memberStatus"];
+  proDaysRemaining: number;
+  sessionState: "logged-in" | "guest" | "expired";
+  onRefreshSession: () => void;
+  onLogout: () => void;
+}) {
+  const displayName = account?.displayName || "未登录用户";
+  const avatar = displayName.slice(0, 1).toUpperCase();
+  const includedDownloads = membership?.includedHdDownloadsRemaining;
+
   return (
     <section aria-label="用户体系">
       <section className="account-hero">
         <div className="account-card">
-          <div className="account-title"><div className="profile-line"><div className="avatar">林</div><div><h1>账号、积分和会员状态统一驱动权限判断。</h1><p className="lead">生成、保存资产、下载无水印图片和购买订阅都需要绑定到用户账号。</p></div></div><span className="status ok">登录有效</span></div>
-          <div className="balance"><div className="metric"><span>积分余额</span><strong>{credits}</strong><small>预计可生成 {Math.floor(credits / 18)} 张标准图</small></div><div className="metric"><span>会员状态</span><strong>{memberStatusLabel(memberStatus)}</strong><small>剩余 {proDaysRemaining} 天</small></div></div>
+          <div className="account-title"><div className="profile-line"><div className="avatar">{avatar}</div><div><h1>{displayName}</h1><p className="lead">{account?.username ? `@${account.username}` : "请登录后查看账号、积分和会员权益。"}</p></div></div><span className={`status ${sessionState === "logged-in" ? "ok" : "wait"}`}>{sessionState === "logged-in" ? "登录有效" : "未登录"}</span></div>
+          <div className="balance"><div className="metric"><span>积分余额</span><strong>{credits}</strong><small>预计可生成 {Math.floor(credits / 10)} 张标准图</small></div><div className="metric"><span>会员状态</span><strong>{memberStatusLabel(memberStatus)}</strong><small>剩余 {proDaysRemaining} 天</small></div></div>
         </div>
-        <aside className="auth-panel"><h2>登录状态模拟</h2><div className="stack"><button className="btn primary full" type="button" onClick={() => onSetSession("logged-in")}>模拟登录成功</button><button className="btn full" type="button" onClick={() => onSetSession("guest")}>切换游客态</button><button className="btn full" type="button" onClick={() => onSetSession("expired")}>模拟登录过期</button></div></aside>
+        <aside className="auth-panel"><h2>登录状态</h2><div className="stack"><div className={`status ${sessionState === "logged-in" ? "ok" : "wait"}`}>{sessionState === "logged-in" ? "server session 已验证" : "需要登录后继续"}</div><button className="btn primary full" type="button" onClick={onRefreshSession}>刷新 session</button><button className="btn full" type="button" onClick={onLogout}>退出当前 session</button></div></aside>
       </section>
       <section className="account-grid">
-        <article className="account-card stack"><h2>权限守卫</h2>{["生成图片", "保存资产", "无水印下载", "购买权益"].map(item => <div className="account-row" key={item}><span>{item}</span><strong>需登录</strong></div>)}</article>
-        <article className="account-card stack"><h2>通知偏好</h2>{["任务完成通知", "积分不足提醒", "会员到期提醒"].map((item, index) => <div className="pref" key={item}><span>{item}</span><button className={`switch ${index !== 1 ? "on" : ""}`} type="button" aria-label={item} /></div>)}</article>
-        <article className="account-card stack"><h2>订单状态说明</h2>{["待支付：权益未生效", "已支付：即时发放", "退款中：冻结对应权益"].map(item => <div className="invoice" key={item}><strong>{item}</strong></div>)}</article>
+        <article className="account-card stack"><h2>权益明细</h2><div className="account-row"><span>扩图能力</span><strong>{membership?.canUseOutpaint ? "可用" : "需 Pro"}</strong></div><div className="account-row"><span>高清无水印</span><strong>{membership?.canDownloadWithoutWatermark ? "Pro 额度优先" : "5 credits / 张"}</strong></div><div className="account-row"><span>本周期含量</span><strong>{typeof includedDownloads === "number" ? `${includedDownloads} 次剩余` : "未开通"}</strong></div></article>
+        <article className="account-card stack"><h2>权限守卫</h2>{["生成图片", "保存资产", "无水印下载", "购买权益"].map(item => <div className="account-row" key={item}><span>{item}</span><strong>{sessionState === "logged-in" ? "server session" : "需登录"}</strong></div>)}</article>
+        <article className="account-card stack"><h2>订单状态说明</h2>{["待支付：权益未生效", "已支付：即时发放", "可重试：支付回调异常后可重新发起"].map(item => <div className="invoice" key={item}><strong>{item}</strong></div>)}</article>
       </section>
     </section>
   );
 }
 
-function BillingPage({ credits, memberStatus, proDaysRemaining, onCreateOrder }: { credits: number; memberStatus: AccountMembershipSummary["memberStatus"]; proDaysRemaining: number; onCreateOrder: (planId: BillingPlanId) => void }) {
+const creditPackOptions: Array<{ planId: BillingPlanId; label: string; price: string }> = [
+  { planId: "credits-500", label: "500 credits", price: "¥29" },
+  { planId: "credits-1500", label: "1,500 credits", price: "¥79" },
+  { planId: "credits-5000", label: "5,000 credits", price: "¥199" }
+];
+
+function BillingPage({
+  credits,
+  memberStatus,
+  proDaysRemaining,
+  includedHdDownloadsRemaining,
+  orders,
+  onCreateOrder
+}: {
+  credits: number;
+  memberStatus: AccountMembershipSummary["memberStatus"];
+  proDaysRemaining: number;
+  includedHdDownloadsRemaining?: number;
+  orders: BillingOrder[];
+  onCreateOrder: (planId: BillingPlanId) => void;
+}) {
+  const visibleOrders = orders.slice(0, 5);
+
   return (
     <section aria-label="权益与购买">
       <section className="billing-hero">
         <div className="billing-panel">
           <h1>把权益说明放在生成与下载的关键时刻。</h1>
           <p className="lead">当用户遇到积分不足、扩图限制、高清无水印下载或商用说明时，页面直接给出当前状态、升级收益和可购买方案。</p>
-          <div className="balance"><div className="metric"><span>当前积分余额</span><strong>{credits}</strong><small>预计可生成 {Math.floor(credits / 18)} 张标准图</small></div><div className="metric"><span>当前会员状态</span><strong>{memberStatusLabel(memberStatus)}</strong><small>剩余 {proDaysRemaining} 天，扩图能力已开启</small></div></div>
-          <div className="notice">下载说明：免费用户下载带水印，点数包用户可生成更多图片，Pro 用户支持高清无水印下载和商用授权说明。</div>
+          <div className="balance"><div className="metric"><span>当前积分余额</span><strong>{credits}</strong><small>预计可生成 {Math.floor(credits / 10)} 张标准图</small></div><div className="metric"><span>当前会员状态</span><strong>{memberStatusLabel(memberStatus)}</strong><small>{memberStatus === "pro" ? `剩余 ${proDaysRemaining} 天，扩图能力已开启` : "开通 Pro 后启用扩图和每月 HD 下载额度"}</small></div></div>
+          <div className="notice">下载说明：高清无水印下载默认扣 5 credits；Pro 每月含 300 次，{typeof includedHdDownloadsRemaining === "number" ? `本周期剩余 ${includedHdDownloadsRemaining} 次` : "开通后按周期统计"}，超额后同样扣 5 credits。</div>
         </div>
-        <aside className="billing-panel"><h2>积分包</h2><div className="packs"><div className="pack"><span>500 积分</span><strong>¥29</strong></div><div className="pack"><span>1,500 积分</span><strong>¥79</strong></div><div className="pack"><span>5,000 积分</span><strong>¥199</strong></div></div><button className="btn primary full" type="button" style={{ marginTop: 14 }} onClick={() => onCreateOrder("credits-1500")}>购买积分包</button></aside>
+        <aside className="billing-panel"><h2>积分额度</h2><div className="packs">{creditPackOptions.map(pack => <button className="pack" key={pack.planId} type="button" onClick={() => onCreateOrder(pack.planId)} aria-label={`购买 ${pack.label}`}><span>{pack.label}</span><strong>{pack.price}</strong></button>)}</div></aside>
       </section>
       <section className="plans">
         {[
-          ["免费用户", "¥0", "每日少量试用积分,标准清晰度预览,下载带水印", "保持免费"],
-          ["点数包用户", "按量购买", "更多生成额度,任务历史永久保留,高清下载按次扣点", "购买点数"],
-          ["Pro 用户", "¥69/月", "无水印下载,高清下载,扩图能力,更高并发额度", "订阅 Pro"]
-        ].map(([title, price, items, action], index) => <article className={`plan ${index === 2 ? "hot" : ""}`} key={title}><h2>{title}</h2><div className="price">{price}</div><div className="list">{items.split(",").map(item => <span className="item" key={item}><i className="dot" />{item}</span>)}</div><button className={`btn ${index === 2 ? "primary" : ""}`} type="button" onClick={() => onCreateOrder(index === 2 ? "pro-monthly" : "credits-1500")}>{action}</button></article>)}
+          { title: "免费用户", price: "¥0", items: "每日少量试用积分,标准清晰度预览,高清无水印下载按次扣 credits", action: "当前方案" },
+          { title: "积分额度用户", price: "按量购买", items: "更多生成额度,任务历史长期保留,高清下载按次扣 credits", action: "购买额度", planId: "credits-1500" as const },
+          { title: "Pro 用户", price: "¥69/月", items: "无水印下载,高清下载,扩图能力,更高并发额度", action: "订阅 Pro", planId: "pro-monthly" as const }
+        ].map(plan => <article className={`plan ${plan.planId === "pro-monthly" ? "hot" : ""}`} key={plan.title}><h2>{plan.title}</h2><div className="price">{plan.price}</div><div className="list">{plan.items.split(",").map(item => <span className="item" key={item}><i className="dot" />{item}</span>)}</div><button className={`btn ${plan.planId === "pro-monthly" ? "primary" : ""}`} type="button" disabled={!plan.planId} onClick={() => { if (plan.planId) onCreateOrder(plan.planId); }}>{plan.action}</button></article>)}
+      </section>
+      <section className="account-card stack" aria-label="最近订单">
+        <h2>最近订单</h2>
+        {visibleOrders.length === 0 && <div className="invoice"><strong>暂无订单</strong><span>购买后会显示支付与履约状态</span></div>}
+        {visibleOrders.map(order => (
+          <div className="invoice" key={order.orderId}>
+            <div>
+              <strong>{billingPlanLabel(order.planId)}</strong>
+              <p className="small">{order.outTradeNo || order.orderId} · {orderStatusLabel(order)}</p>
+            </div>
+            {(order.fulfillmentStatus === "retryable" || order.status === "failed") ? (
+              <button className="btn" type="button" onClick={() => onCreateOrder(order.planId)}>重新支付</button>
+            ) : order.paymentUrl && order.fulfillmentStatus !== "fulfilled" ? (
+              <a className="btn" href={order.paymentUrl}>继续支付</a>
+            ) : (
+              <span className={`status ${order.fulfillmentStatus === "fulfilled" ? "ok" : "wait"}`}>{orderStatusLabel(order)}</span>
+            )}
+          </div>
+        ))}
       </section>
     </section>
   );
 }
 
 function DownloadModal({ decision, onClose }: { decision: DownloadDecision | null; onClose: () => void }) {
+  function confirmDownload() {
+    if (decision?.allowed && decision.downloadUrl) {
+      const link = document.createElement("a");
+      link.href = decision.downloadUrl;
+      link.download = `${decision.assetId}.png`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    }
+    onClose();
+  }
+
   return (
     <div className={`modal ${decision ? "show" : ""}`} role="dialog" aria-modal="true" aria-labelledby="download-modal-title" hidden={!decision} onClick={event => { if (event.target === event.currentTarget) onClose(); }}>
       <div className="dialog">
         <h2 id="download-modal-title">权益与下载权限确认</h2>
         <p>{decision?.reason || "下载前会统一判断登录状态、积分余额、会员权限和订单生效状态。"}</p>
-        <div className="rights"><div className="right"><span>免费用户</span><strong>带水印 · 标清</strong></div><div className="right"><span>点数包用户</span><strong>高清按次扣点</strong></div><div className="right"><span>Pro 用户</span><strong>高清无水印</strong></div><div className="right"><span>本次下载</span><strong>{decision?.allowed ? `${decision.quality} · ${decision.watermark ? "带水印" : "无水印"}` : "不可下载"}</strong></div></div>
-        <button className="btn primary full" type="button" onClick={onClose}>确认并继续</button>
+        <div className="rights"><div className="right"><span>非 Pro 用户</span><strong>高清无水印 · 5 credits</strong></div><div className="right"><span>Pro 用户</span><strong>每月 300 次免费</strong></div><div className="right"><span>Pro 超额</span><strong>5 credits / 张</strong></div><div className="right"><span>本次下载</span><strong>{decision?.allowed ? `${decision.quality} · ${decision.watermark ? "带水印" : "无水印"} · ${decision.costCredits} credits` : "不可下载"}</strong></div></div>
+        <button className="btn primary full" type="button" onClick={confirmDownload}>确认并下载</button>
       </div>
     </div>
   );
 }
 
-function AuthModal({ open, action, onClose, onLogin }: { open: boolean; action: string | null; onClose: () => void; onLogin: () => void }) {
+function AuthModal({
+  open,
+  action,
+  onClose,
+  onSubmit
+}: {
+  open: boolean;
+  action: string | null;
+  onClose: () => void;
+  onSubmit: (input: { mode: "login" | "register"; username: string; password: string; displayName?: string }) => void;
+}) {
   const visible = open;
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [displayName, setDisplayName] = useState("");
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    onSubmit({
+      mode,
+      username,
+      password,
+      displayName: displayName.trim() || undefined
+    });
+  }
+
   return (
     <div className={`modal ${visible ? "show" : ""}`} role="dialog" aria-modal="true" aria-labelledby="auth-modal-title" hidden={!visible} onClick={event => { if (event.target === event.currentTarget) onClose(); }}>
-      <div className="dialog">
+      <form className="dialog" onSubmit={handleSubmit}>
         <h2 id="auth-modal-title">{action ? `登录后继续：${action}` : "登录后继续创作"}</h2>
         <p>生成、保存资产、下载无水印图片和购买订阅都需要绑定到你的 Flux Art 账号。</p>
-        <div className="rights"><div className="right"><span>登录方式</span><strong>手机号 / 邮箱验证码</strong></div><div className="right"><span>登录后恢复</span><strong>Prompt 与尺寸参数</strong></div><div className="right"><span>权限校验</span><strong>积分、Pro、商用授权</strong></div></div>
-        <button className="btn primary full" type="button" onClick={onLogin}>立即登录</button>
+        <div className="auth-tabs" role="tablist" aria-label="认证方式"><button className={mode === "login" ? "active" : ""} type="button" onClick={() => setMode("login")}>登录</button><button className={mode === "register" ? "active" : ""} type="button" onClick={() => setMode("register")}>注册</button></div>
+        <label>用户名<input className="input" value={username} onChange={event => setUsername(event.target.value)} minLength={3} maxLength={32} required /></label>
+        {mode === "register" && <label>显示名称<input className="input" value={displayName} onChange={event => setDisplayName(event.target.value)} maxLength={64} /></label>}
+        <label>密码<input className="input" type="password" value={password} onChange={event => setPassword(event.target.value)} minLength={8} maxLength={128} required /></label>
+        <div className="rights"><div className="right"><span>登录方式</span><strong>用户名 / 密码</strong></div><div className="right"><span>登录后恢复</span><strong>Prompt 与尺寸参数</strong></div><div className="right"><span>权限校验</span><strong>积分、Pro、商用授权</strong></div></div>
+        <button className="btn primary full" type="submit">{mode === "register" ? "注册并登录" : "立即登录"}</button>
         <button className="btn full" type="button" style={{ marginTop: 10 }} onClick={onClose}>稍后再说</button>
-      </div>
+      </form>
     </div>
   );
 }

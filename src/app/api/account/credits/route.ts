@@ -1,6 +1,9 @@
 import { getCreditsSummary } from "@/server/account/account-service";
-import { ok } from "@/server/shared/api-response";
+import { getRequestSession, renewSessionCookie } from "@/server/auth/request-auth";
+import { fail, ok } from "@/server/shared/api-response";
 
 export async function GET() {
-  return ok({ credits: await getCreditsSummary() });
+  const session = await getRequestSession();
+  if (!session) return fail("authentication is required", 401, "AUTH_REQUIRED");
+  return renewSessionCookie(ok({ credits: await getCreditsSummary(session.account.userId) }), session.sessionToken, session.session);
 }

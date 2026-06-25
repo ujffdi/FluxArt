@@ -1,0 +1,1140 @@
+import { randomUUID } from "node:crypto";
+import Module from "node:module";
+import path from "node:path";
+import sharp from "sharp";
+import type { BillingPlanId } from "../src/types/billing";
+import type { ImageAsset } from "../src/types/image";
+
+const originalResolveFilename = (Module as unknown as { _resolveFilename: (...args: unknown[]) => string })._resolveFilename;
+(Module as unknown as { _resolveFilename: (...args: unknown[]) => string })._resolveFilename = function resolveAlias(request: unknown, parent: unknown, isMain: unknown, options: unknown) {
+  if (typeof request === "string" && request.startsWith("@/")) {
+    return originalResolveFilename.call(this, path.join(process.cwd(), ".tmp/smoke-repositories/src", request.slice(2)), parent, isMain, options);
+  }
+  return originalResolveFilename.call(this, request, parent, isMain, options);
+};
+
+type RecordValue = string | number | boolean | null | Date | Record<string, unknown> | undefined;
+type DbRecord = Record<string, RecordValue>;
+
+function id(prefix: string) {
+  return `${prefix}-${randomUUID()}`;
+}
+
+function comparable(value: unknown) {
+  return value instanceof Date ? value.toISOString() : String(value || "");
+}
+
+function matchesWhere(record: DbRecord, where?: Record<string, unknown>): boolean {
+  if (!where) return true;
+  for (const [key, value] of Object.entries(where)) {
+    if (value && typeof value === "object" && "gt" in value) {
+      if (!(comparable(record[key]) > comparable((value as { gt: unknown }).gt))) return false;
+      continue;
+    }
+    if (value && typeof value === "object" && "lte" in value) {
+      if (!(comparable(record[key]) <= comparable((value as { lte: unknown }).lte))) return false;
+      continue;
+    }
+    if (value && typeof value === "object" && "lt" in value) {
+      if (!(Number(record[key] || 0) < Number((value as { lt: unknown }).lt))) return false;
+      continue;
+    }
+    if (value && typeof value === "object" && "not" in value) {
+      if (record[key] === (value as { not: unknown }).not) return false;
+      continue;
+    }
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      if (!matchesWhere(record, value as Record<string, unknown>)) return false;
+      continue;
+    }
+    if (value === null) {
+      if (record[key] !== null && record[key] !== undefined) return false;
+      continue;
+    }
+    if (record[key] !== value) return false;
+  }
+  return true;
+}
+
+function makeDelegate(initial: DbRecord[] = []) {
+  const rows = [...initial];
+
+  return {
+    rows,
+    async findMany(args: Record<string, unknown> = {}) {
+      const where = args.where as Record<string, unknown> | undefined;
+      const result = rows.filter(row => matchesWhere(row, where));
+      return typeof args.take === "number" ? result.slice(0, args.take) : result;
+    },
+    async findUnique(args: Record<string, unknown>) {
+      return rows.find(row => matchesWhere(row, args.where as Record<string, unknown>)) || null;
+    },
+    async findFirst(args: Record<string, unknown> = {}) {
+      return rows.find(row => matchesWhere(row, args.where as Record<string, unknown> | undefined)) || null;
+    },
+    async create(args: Record<string, unknown>) {
+      const data = args.data as DbRecord;
+      const row = { ...data, id: data.id || id("db"), createdAt: data.createdAt || new Date(), updatedAt: data.updatedAt || new Date() };
+      rows.unshift(row);
+      return row;
+    },
+    async update(args: Record<string, unknown>) {
+      const row = rows.find(item => matchesWhere(item, args.where as Record<string, unknown>));
+      if (!row) throw new Error(`record not found for ${JSON.stringify(args.where)}`);
+      for (const [key, value] of Object.entries(args.data as DbRecord)) {
+        if (value && typeof value === "object" && "increment" in value) {
+          row[key] = Number(row[key] || 0) + Number((value as { increment: number }).increment);
+        } else {
+          row[key] = value;
+        }
+      }
+      row.updatedAt = new Date();
+      return row;
+    },
+    async updateMany(args: Record<string, unknown>) {
+      const matchingRows = rows.filter(item => matchesWhere(item, args.where as Record<string, unknown>));
+      for (const row of matchingRows) {
+        for (const [key, value] of Object.entries(args.data as DbRecord)) {
+          if (value && typeof value === "object" && "increment" in value) {
+            row[key] = Number(row[key] || 0) + Number((value as { increment: number }).increment);
+          } else {
+            row[key] = value;
+          }
+        }
+        row.updatedAt = new Date();
+      }
+      return { count: matchingRows.length };
+    },
+    async count(args: Record<string, unknown> = {}) {
+      return rows.filter(row => matchesWhere(row, args.where as Record<string, unknown> | undefined)).length;
+    }
+  };
+}
+
+function expect(condition: unknown, message: string) {
+  if (!condition) throw new Error(message);
+}
+
+async function run() {
+  const { createPrismaRepositories, setPrismaClientForTesting } = await import("../src/server/data/prisma-adapter");
+  const { createMockDataStore, createMockRepositories, setRepositoriesForTesting } = await import("../src/server/data/repositories");
+  const { getCreditsSummary } = await import("../src/server/account/account-service");
+  const { createTask, deleteAsset, listAssets, runImageTask, transitionTaskState } = await import("../src/server/image/business/image-service");
+  const { storeGeneratedAsset } = await import("../src/server/image/storage/upload-service");
+  const { submitImageGeneration } = await import("../src/server/image/ai/image-model-adapter");
+  const { TaskCapabilityError, TaskConcurrencyError } = await import("../src/server/image/business/task-policy");
+  const userId = "usr-smoke";
+  const now = new Date("2026-06-24T00:00:00.000Z");
+  const delegates = {
+    user: makeDelegate([{ id: userId, username: "smoke", displayName: "Smoke User", status: "active", memberStatus: "free", createdAt: now, updatedAt: now }]),
+    userCredential: makeDelegate([]),
+    userSession: makeDelegate([]),
+    authRateLimitBucket: makeDelegate([]),
+    creditBucket: makeDelegate([{ id: "bucket-smoke", userId, sourceType: "registration", creditType: "promotional", originalAmount: 50, remainingAmount: 50, validFrom: now, validUntil: null, priority: 10, createdAt: now, updatedAt: now }]),
+    creditLedgerEntry: makeDelegate([]),
+    creditHold: makeDelegate([]),
+    order: makeDelegate([]),
+    paymentNotification: makeDelegate([]),
+    membershipPlan: makeDelegate([{ id: "plan-pro-monthly", code: "pro-monthly", displayName: "Pro", monthlyPriceCents: 6900, monthlyCreditGrant: 1000, hdFairUseCap: 300, active: true, createdAt: now, updatedAt: now }]),
+    membershipCycle: makeDelegate([]),
+    imageUpload: makeDelegate([]),
+    imageTask: makeDelegate([]),
+    providerSubmission: makeDelegate([]),
+    providerResult: makeDelegate([]),
+    imageAsset: makeDelegate([]),
+    assetVersionNode: makeDelegate([]),
+    downloadEvent: makeDelegate([]),
+    assetCleanupJob: makeDelegate([])
+  };
+  const prismaClient = {
+    ...delegates,
+    async $transaction<T>(fn: (client: typeof delegates) => Promise<T>) {
+      return fn(delegates);
+    }
+  };
+
+  setPrismaClientForTesting(prismaClient);
+  const repositories = createPrismaRepositories();
+
+  const account = await repositories.account.getCurrentAccount(userId);
+  expect(account.credits === 50, "Prisma adapter should read account credit balance");
+
+  const registration = await repositories.auth.createRegistration({
+    user: { username: "registered", displayName: "Registered User", memberStatus: "free" },
+    credential: {
+      id: "credential-registered",
+      passwordHash: "hash",
+      hashVersion: "scrypt-v1",
+      passwordChangedAt: now.toISOString()
+    },
+    creditBucket: {
+      id: "bucket-registered",
+      sourceType: "registration",
+      creditType: "promotional",
+      originalAmount: 50,
+      remainingAmount: 50,
+      validFrom: now.toISOString(),
+      validUntil: new Date("2026-09-22T00:00:00.000Z").toISOString(),
+      priority: 10,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString()
+    },
+    ledgerEntry: {
+      id: "ledger-registered",
+      entryType: "grant",
+      amount: 50,
+      balanceAfter: 50,
+      sourceRefType: "registration",
+      label: "Registration Credit Grant",
+      createdAt: now.toISOString()
+    },
+    session: {
+      id: "session-registered",
+      tokenHash: "registered-token-hash",
+      slidingExpiresAt: new Date("2026-07-24T00:00:00.000Z").toISOString(),
+      absoluteExpiresAt: new Date("2026-09-22T00:00:00.000Z").toISOString(),
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString()
+    }
+  });
+  expect(registration.creditBucket.userId === registration.user.id, "Prisma adapter should atomically attach registration bucket to user");
+  expect(registration.ledgerEntry.sourceRefId === registration.user.id, "Prisma adapter should attach registration ledger source to user");
+  expect((await repositories.account.getCurrentAccount(registration.user.id)).credits === 50, "Prisma adapter should expose registration credit grant");
+
+  const firstRateLimit = await repositories.auth.consumeRateLimit({
+    scope: "login:username:smoke",
+    now: now.toISOString(),
+    resetAt: new Date("2026-06-24T00:05:00.000Z").toISOString(),
+    maxAttempts: 2
+  });
+  const secondRateLimit = await repositories.auth.consumeRateLimit({
+    scope: "login:username:smoke",
+    now: now.toISOString(),
+    resetAt: new Date("2026-06-24T00:05:00.000Z").toISOString(),
+    maxAttempts: 2
+  });
+  const blockedRateLimit = await repositories.auth.consumeRateLimit({
+    scope: "login:username:smoke",
+    now: now.toISOString(),
+    resetAt: new Date("2026-06-24T00:05:00.000Z").toISOString(),
+    maxAttempts: 2
+  });
+  expect(firstRateLimit.allowed && secondRateLimit.allowed && !blockedRateLimit.allowed, "Prisma adapter should persist auth rate limits");
+
+  const credential = await repositories.auth.createCredential({
+    id: "credential-smoke",
+    userId,
+    username: "smoke",
+    passwordHash: "hash",
+    hashVersion: "scrypt-v1",
+    passwordChangedAt: now.toISOString()
+  });
+  expect((await repositories.auth.getCredentialByUsername(credential.username))?.userId === userId, "Prisma adapter should create/read credentials by username");
+  expect((await repositories.account.getCurrentAccount(userId)).username === credential.username, "Prisma adapter should round-trip account username from credentials");
+  await repositories.auth.updatePasswordHash(userId, "hash2", now.toISOString());
+  expect((await repositories.auth.getCredentialByUserId(userId))?.passwordHash === "hash2", "Prisma adapter should update credentials");
+
+  const session = await repositories.auth.createSession({
+    id: "session-smoke",
+    userId,
+    tokenHash: "token-hash",
+    slidingExpiresAt: new Date("2026-07-24T00:00:00.000Z").toISOString(),
+    absoluteExpiresAt: new Date("2026-09-22T00:00:00.000Z").toISOString(),
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString()
+  });
+  expect((await repositories.auth.getSessionByTokenHash(session.tokenHash))?.id === session.id, "Prisma adapter should create/read sessions");
+  await repositories.auth.touchSession(session.id, new Date("2026-07-25T00:00:00.000Z").toISOString());
+  expect((await repositories.auth.listActiveSessions(userId, now.toISOString())).length === 1, "Prisma adapter should list active sessions");
+  await repositories.auth.revokeSession(session.id, now.toISOString());
+  expect((await repositories.auth.listActiveSessions(userId, now.toISOString())).length === 0, "Prisma adapter should update/revoke sessions");
+
+  const bucket = await repositories.credits.createBucket({
+    id: "bucket-purchased-smoke",
+    userId,
+    sourceType: "purchased",
+    creditType: "purchased",
+    originalAmount: 500,
+    remainingAmount: 500,
+    validFrom: now.toISOString(),
+    validUntil: new Date("2028-06-24T00:00:00.000Z").toISOString(),
+    priority: 90,
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString()
+  });
+  expect((await repositories.credits.listBuckets(userId)).some(item => item.id === bucket.id), "Prisma adapter should create/list credit buckets");
+  await repositories.credits.updateBucket(bucket.id, { remainingAmount: 490 });
+  expect((await repositories.credits.listBuckets(userId)).find(item => item.id === bucket.id)?.remainingAmount === 490, "Prisma adapter should update credit buckets");
+
+  const ledger = await repositories.credits.createLedgerEntry({
+    id: "ledger-smoke",
+    userId,
+    bucketId: bucket.id,
+    entryType: "grant",
+    amount: 500,
+    balanceAfter: 550,
+    sourceRefType: "smoke",
+    label: "Repository smoke grant",
+    createdAt: now.toISOString()
+  });
+  expect((await repositories.credits.listLedgerEntries(userId)).some(item => item.id === ledger.id), "Prisma adapter should create/list ledger entries");
+
+  const reservation = await repositories.credits.reserveCredits({
+    userId,
+    amount: 20,
+    holdId: "hold-reservation-smoke",
+    taskId: "task-reservation-smoke",
+    label: "Repository Reservation Hold",
+    now: now.toISOString(),
+    expiresAt: new Date("2026-06-24T01:00:00.000Z").toISOString()
+  });
+  expect(reservation.hold.amount === 20, "Prisma adapter should create a credit hold during reservation");
+  expect(reservation.ledgerEntries.some(entry => entry.entryType === "hold" && entry.amount < 0), "Prisma adapter should write hold ledger entries during reservation");
+  expect((await repositories.credits.listBuckets(userId)).find(item => item.id === "bucket-smoke")?.remainingAmount === 30, "Prisma adapter should deduct reserved credits from priority buckets");
+  const spentReservation = await repositories.credits.finalizeHoldSpend({ holdId: reservation.hold.id, now: now.toISOString(), label: "Repository Reservation Spend" });
+  expect(spentReservation?.hold.status === "spent", "Prisma adapter should convert active credit holds to spent");
+  expect(spentReservation?.ledgerEntries.some(entry => entry.entryType === "spend" && entry.amount < 0), "Prisma adapter should write spend ledger entries");
+  const refundedReservation = await repositories.credits.refundHold({ holdId: reservation.hold.id, now: now.toISOString(), label: "Repository Reservation Refund" });
+  expect(refundedReservation?.hold.status === "refunded", "Prisma adapter should refund spent credit holds");
+  expect(refundedReservation?.ledgerEntries.some(entry => entry.entryType === "refund" && entry.amount > 0), "Prisma adapter should write refund ledger entries");
+  expect((await repositories.credits.listBuckets(userId)).find(item => item.id === "bucket-smoke")?.remainingAmount === 50, "Prisma adapter should restore bucket credits during refund");
+
+  const positiveAdjustment = await repositories.credits.createAdjustment({ userId, amount: 7, now: now.toISOString(), label: "Repository Positive Adjustment", sourceRefId: "adjust-positive-smoke" });
+  expect(positiveAdjustment.bucket?.sourceType === "adjustment", "Prisma adapter should create an adjustment bucket for positive adjustments");
+  expect(positiveAdjustment.ledgerEntries.some(entry => entry.entryType === "adjustment" && entry.amount === 7), "Prisma adapter should write positive adjustment ledger entries");
+  const negativeAdjustment = await repositories.credits.createAdjustment({ userId, amount: -5, now: now.toISOString(), label: "Repository Negative Adjustment", sourceRefId: "adjust-negative-smoke" });
+  expect(negativeAdjustment.ledgerEntries.some(entry => entry.entryType === "adjustment" && entry.amount < 0), "Prisma adapter should write negative adjustment ledger entries");
+
+  const hold = await repositories.credits.createHold({
+    id: "hold-smoke",
+    userId,
+    amount: 10,
+    status: "active",
+    expiresAt: new Date("2026-06-24T01:00:00.000Z").toISOString(),
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString()
+  });
+  expect((await repositories.credits.getHold(hold.id))?.status === "active", "Prisma adapter should create/read credit holds");
+  await repositories.credits.updateHold(hold.id, { status: "released", releasedAt: now.toISOString() });
+  expect((await repositories.credits.getHold(hold.id))?.status === "released", "Prisma adapter should update credit holds");
+
+  const lowBalanceStore = createMockDataStore();
+  lowBalanceStore.users[0].memberStatus = "free";
+  lowBalanceStore.creditBuckets = [];
+  lowBalanceStore.ledgerEntries = [];
+  lowBalanceStore.tasks = [];
+  lowBalanceStore.creditHolds = [];
+  setRepositoriesForTesting(createMockRepositories(lowBalanceStore));
+  const lowBalanceCredits = await getCreditsSummary(lowBalanceStore.users[0].id);
+  expect(lowBalanceCredits.credits === 10, "credit service should lazily grant daily free credits on balance check");
+  expect(lowBalanceCredits.recentChanges.some(entry => entry.label === "Daily Free Credit Grant"), "credit service should record a daily free grant ledger entry");
+  const cappedDailyStore = createMockDataStore();
+  const currentSmokeDate = new Date();
+  cappedDailyStore.users[0].memberStatus = "free";
+  cappedDailyStore.creditBuckets = [0, 1, 2].map(index => ({
+    id: `bucket-daily-cap-${index}`,
+    userId: cappedDailyStore.users[0].id,
+    sourceType: "daily_free" as const,
+    creditType: "promotional" as const,
+    originalAmount: 10,
+    remainingAmount: 10,
+    validFrom: new Date(currentSmokeDate.getTime() - index * 86400000).toISOString(),
+    validUntil: new Date(currentSmokeDate.getTime() + 2 * 86400000).toISOString(),
+    priority: 5,
+    createdAt: currentSmokeDate.toISOString(),
+    updatedAt: currentSmokeDate.toISOString()
+  }));
+  cappedDailyStore.ledgerEntries = [];
+  setRepositoriesForTesting(createMockRepositories(cappedDailyStore));
+  const cappedDailyCredits = await getCreditsSummary(cappedDailyStore.users[0].id);
+  expect(cappedDailyCredits.credits === 30, "daily free credits should cap at 30 active credits");
+  expect(cappedDailyStore.creditBuckets.length === 3, "daily free cap should avoid creating an extra bucket");
+  setRepositoriesForTesting(undefined);
+  setRepositoriesForTesting(createMockRepositories(lowBalanceStore));
+  try {
+    await createTask({ taskType: "t2i", prompt: "too expensive", count: 4, size: "1024x1024" }, lowBalanceStore.users[0].id);
+    throw new Error("expected insufficient credits");
+  } catch (error) {
+    expect(error instanceof Error && error.name === "CreditBalanceError", "credit service should reject insufficient generation balance");
+  }
+  expect(lowBalanceStore.tasks.length === 0, "insufficient credit failures should not create image tasks");
+  expect(lowBalanceStore.creditHolds.length === 0, "insufficient credit failures should not create credit holds");
+  setRepositoriesForTesting(undefined);
+
+  const failureStore = createMockDataStore();
+  failureStore.users[0].memberStatus = "free";
+  failureStore.creditBuckets = [{
+    id: "bucket-failure",
+    userId: failureStore.users[0].id,
+    sourceType: "registration",
+    creditType: "promotional",
+    originalAmount: 50,
+    remainingAmount: 50,
+    validFrom: now.toISOString(),
+    validUntil: new Date("2026-09-22T00:00:00.000Z").toISOString(),
+    priority: 10,
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString()
+  }];
+  failureStore.ledgerEntries = [];
+  failureStore.tasks = [];
+  failureStore.creditHolds = [];
+  setRepositoriesForTesting(createMockRepositories(failureStore));
+  const previousImageModelExecution = process.env.IMAGE_MODEL_EXECUTION;
+  const previousOpenAiApiKey = process.env.OPENAI_API_KEY;
+  process.env.IMAGE_MODEL_EXECUTION = "live";
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const providerFailureTask = await createTask({ taskType: "t2i", prompt: "provider failure", count: 1, size: "1024x1024" }, failureStore.users[0].id);
+    const failedProviderTask = await runImageTask(providerFailureTask.id, failureStore.users[0].id);
+    expect(failedProviderTask?.status === "failed", "provider failure should fail the queued runner task");
+    expect(failedProviderTask?.errorMessage?.includes("Missing OPENAI_API_KEY"), "provider failure should surface missing live key");
+  } finally {
+    if (previousImageModelExecution) process.env.IMAGE_MODEL_EXECUTION = previousImageModelExecution;
+    else delete process.env.IMAGE_MODEL_EXECUTION;
+    if (previousOpenAiApiKey) process.env.OPENAI_API_KEY = previousOpenAiApiKey;
+    else delete process.env.OPENAI_API_KEY;
+    setRepositoriesForTesting(undefined);
+  }
+  expect(failureStore.tasks.length === 1, "provider failure should preserve the failed image task for inspection");
+  expect(failureStore.creditHolds[0]?.status === "released", "provider failure should release the reserved credit hold");
+  expect(failureStore.creditBuckets[0].remainingAmount === 50, "provider failure should restore reserved bucket credits");
+  expect(failureStore.ledgerEntries.some(entry => entry.entryType === "release"), "provider failure should write release ledger entries");
+
+  const originalFetch = globalThis.fetch;
+  const previousExecutionForProvider = process.env.IMAGE_MODEL_EXECUTION;
+  const previousProvider = process.env.IMAGE_MODEL_PROVIDER;
+  const previousModel = process.env.IMAGE_MODEL_NAME;
+  const previousBaseUrl = process.env.IMAGE_MODEL_BASE_URL;
+  const previousKeyRef = process.env.IMAGE_MODEL_API_KEY_SECRET_REF;
+  const previousFakeProviderKey = process.env.FAKE_PROVIDER_KEY;
+  try {
+    const providerImage = await sharp({ create: { width: 16, height: 16, channels: 3, background: "#155e75" } }).png().toBuffer();
+    process.env.IMAGE_MODEL_EXECUTION = "live";
+    process.env.IMAGE_MODEL_PROVIDER = "custom";
+    process.env.IMAGE_MODEL_NAME = "custom-image-model";
+    process.env.IMAGE_MODEL_BASE_URL = "https://provider.example.test/v1";
+    process.env.IMAGE_MODEL_API_KEY_SECRET_REF = "FAKE_PROVIDER_KEY";
+    process.env.FAKE_PROVIDER_KEY = "fake-key";
+    globalThis.fetch = async () => new Response(JSON.stringify({ data: [{ b64_json: providerImage.toString("base64") }] }), {
+      status: 200,
+      headers: { "content-type": "application/json", "x-request-id": "provider-request-1" }
+    });
+    const liveSubmission = await submitImageGeneration({ taskType: "t2i", prompt: "provider contract", count: 1, size: "16x16", modelProvider: "openai", modelName: "client-requested-model" });
+    expect(liveSubmission.provider === "custom" && liveSubmission.modelName === "custom-image-model", "custom provider env should configure the provider seam");
+    expect(liveSubmission.modelName !== "client-requested-model", "server provider env should override client model input");
+    expect(liveSubmission.providerMode === "sync" && liveSubmission.outputBytes && liveSubmission.outputBytes.length > 0, "OpenAI-compatible b64 output should normalize to synchronous provider bytes");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousExecutionForProvider) process.env.IMAGE_MODEL_EXECUTION = previousExecutionForProvider;
+    else delete process.env.IMAGE_MODEL_EXECUTION;
+    if (previousProvider) process.env.IMAGE_MODEL_PROVIDER = previousProvider;
+    else delete process.env.IMAGE_MODEL_PROVIDER;
+    if (previousModel) process.env.IMAGE_MODEL_NAME = previousModel;
+    else delete process.env.IMAGE_MODEL_NAME;
+    if (previousBaseUrl) process.env.IMAGE_MODEL_BASE_URL = previousBaseUrl;
+    else delete process.env.IMAGE_MODEL_BASE_URL;
+    if (previousKeyRef) process.env.IMAGE_MODEL_API_KEY_SECRET_REF = previousKeyRef;
+    else delete process.env.IMAGE_MODEL_API_KEY_SECRET_REF;
+    if (previousFakeProviderKey) process.env.FAKE_PROVIDER_KEY = previousFakeProviderKey;
+    else delete process.env.FAKE_PROVIDER_KEY;
+  }
+
+  const capabilityStore = createMockDataStore();
+  capabilityStore.users[0].memberStatus = "free";
+  capabilityStore.creditBuckets[0].remainingAmount = 100;
+  capabilityStore.creditBuckets[0].originalAmount = 100;
+  capabilityStore.tasks = [];
+  capabilityStore.creditHolds = [];
+  capabilityStore.ledgerEntries = [];
+  setRepositoriesForTesting(createMockRepositories(capabilityStore));
+  try {
+    await createTask({ taskType: "outpaint", prompt: "free outpaint should fail", count: 1, size: "1024x1024", sourceAssetId: "IMG-1832" }, capabilityStore.users[0].id);
+    throw new Error("expected free outpaint capability failure");
+  } catch (error) {
+    expect(error instanceof TaskCapabilityError, "free users should be blocked from outpaint task creation");
+  } finally {
+    setRepositoriesForTesting(undefined);
+  }
+  expect(capabilityStore.tasks.length === 0, "capability failures should not create image tasks");
+  expect(capabilityStore.creditHolds.length === 0, "capability failures should not create credit holds");
+
+  const limitStore = createMockDataStore();
+  limitStore.users[0].memberStatus = "free";
+  limitStore.creditBuckets[0].remainingAmount = 100;
+  limitStore.creditBuckets[0].originalAmount = 100;
+  limitStore.creditHolds = [];
+  limitStore.ledgerEntries = [];
+  limitStore.tasks = [{
+    id: "task-active-free",
+    userId: limitStore.users[0].id,
+    taskType: "t2i",
+    status: "queued",
+    prompt: "active",
+    requestPayload: {},
+    modelProvider: "openai",
+    modelName: "gpt-image-2",
+    chargedCredits: 10,
+    priority: 10,
+    resultAssetIds: [],
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString()
+  }];
+  setRepositoriesForTesting(createMockRepositories(limitStore));
+  try {
+    await createTask({ taskType: "t2i", prompt: "free over limit", count: 1, size: "1024x1024" }, limitStore.users[0].id);
+    throw new Error("expected free concurrency failure");
+  } catch (error) {
+    expect(error instanceof TaskConcurrencyError, "free users should be limited to one active task");
+  } finally {
+    setRepositoriesForTesting(undefined);
+  }
+  expect(limitStore.tasks.length === 1, "concurrency failures should not create extra image tasks");
+  expect(limitStore.creditHolds.length === 0, "concurrency failures should not create credit holds");
+
+  const creditPackStore = createMockDataStore();
+  creditPackStore.users[0].memberStatus = "credit_pack";
+  creditPackStore.creditBuckets[0].remainingAmount = 100;
+  creditPackStore.creditBuckets[0].originalAmount = 100;
+  creditPackStore.tasks = [];
+  creditPackStore.creditHolds = [];
+  creditPackStore.ledgerEntries = [];
+  setRepositoriesForTesting(createMockRepositories(creditPackStore));
+  const creditPackTask = await createTask({ taskType: "inpaint", prompt: "credit pack inpaint", count: 1, size: "1024x1024", sourceAssetId: "IMG-1832" }, creditPackStore.users[0].id);
+  expect(creditPackTask.status === "queued", "task creation should start in queued state");
+  expect(creditPackTask.priority === 50, "credit pack users should store task priority 50");
+  expect(creditPackStore.creditHolds[0]?.status === "active", "task creation should leave credit holds active");
+  expect(!creditPackStore.ledgerEntries.some(entry => entry.entryType === "spend"), "task creation should not spend credits before approved output");
+  await transitionTaskState(creditPackTask.id, "running", creditPackStore.users[0].id);
+  await transitionTaskState(creditPackTask.id, "storing", creditPackStore.users[0].id);
+  await transitionTaskState(creditPackTask.id, "reviewing", creditPackStore.users[0].id);
+  const approvedTask = await transitionTaskState(creditPackTask.id, "succeeded", creditPackStore.users[0].id);
+  expect(approvedTask?.status === "succeeded", "approved usable output should transition tasks to succeeded");
+  expect(creditPackStore.creditHolds[0]?.status === "spent", "approved usable output should convert active holds to spent");
+  expect(creditPackStore.ledgerEntries.some(entry => entry.entryType === "spend"), "approved usable output should write spend ledger entries");
+  setRepositoriesForTesting(undefined);
+
+  const proStore = createMockDataStore();
+  proStore.users[0].memberStatus = "pro";
+  proStore.creditBuckets[0].remainingAmount = 100;
+  proStore.creditBuckets[0].originalAmount = 100;
+  proStore.tasks = [];
+  proStore.creditHolds = [];
+  proStore.ledgerEntries = [];
+  setRepositoriesForTesting(createMockRepositories(proStore));
+  const proTask = await createTask({ taskType: "outpaint", prompt: "pro outpaint", count: 1, size: "1024x1024", sourceAssetId: "IMG-1832" }, proStore.users[0].id);
+  expect(proTask.priority === 100, "pro users should store task priority 100");
+  await transitionTaskState(proTask.id, "running", proStore.users[0].id);
+  await transitionTaskState(proTask.id, "storing", proStore.users[0].id);
+  await transitionTaskState(proTask.id, "reviewing", proStore.users[0].id);
+  const rejectedTask = await transitionTaskState(proTask.id, "failed", proStore.users[0].id, { errorCode: "OUTPUT_REJECTED", errorMessage: "output review rejected" });
+  expect(rejectedTask?.status === "failed", "output review failures should transition tasks to failed");
+  expect(proStore.creditHolds[0]?.status === "released", "output review failures should release active holds");
+  expect(proStore.ledgerEntries.some(entry => entry.entryType === "release"), "output review failures should write release ledger entries");
+  setRepositoriesForTesting(undefined);
+
+  const task = await repositories.image.createTask({
+    userId,
+    taskType: "t2i",
+    status: "queued",
+    prompt: "smoke",
+    requestPayload: { size: "1024x1024" },
+    modelProvider: "openai",
+    modelName: "gpt-image-2",
+    chargedCredits: 10,
+    priority: 10
+  });
+  expect(task.id, "Prisma adapter should create a task");
+  expect((await repositories.image.getTask(task.id))?.id === task.id, "Prisma adapter should read a task");
+  await repositories.image.updateTask(task.id, { status: "running" });
+  expect((await repositories.image.getTask(task.id))?.status === "running", "Prisma adapter should update a task");
+  expect((await repositories.image.listTasks({ userId })).length === 1, "Prisma adapter should list tasks");
+
+  const asset = await repositories.image.createAsset({
+    id: "asset-smoke",
+    userId,
+    title: "Smoke asset",
+    taskId: task.id,
+    taskType: "t2i",
+    status: "succeeded",
+    prompt: "smoke",
+    imageUrl: "https://cdn.example.test/assets/asset-smoke.png",
+    objectKey: "assets/smoke/7be91c47-c9e4-48d2-b9fd-5f4720e7b5af.png",
+    publicUrl: "https://cdn.example.test/assets/asset-smoke.png",
+    mimeType: "image/png",
+    sizeBytes: 1024,
+    width: 1024,
+    height: 1024,
+    reviewStatus: "approved",
+    downloadState: "not_downloaded",
+    modelProvider: "openai",
+    modelName: "gpt-image-2",
+    entitlementSnapshot: {
+      memberStatus: "pro",
+      capturedAt: now.toISOString(),
+      canDownloadHd: true,
+      canDownloadWithoutWatermark: true,
+      commercialAuthorizationStatement: "Commercial authorization smoke"
+    },
+    commercialAuthorizationStatement: "Commercial authorization smoke",
+    createdAt: now.toISOString()
+  });
+  expect((await repositories.image.getAsset(asset.id))?.objectKey === asset.objectKey, "Prisma adapter should create/read asset storage metadata");
+  expect((await repositories.image.getAsset(asset.id))?.entitlementSnapshot?.memberStatus === "pro", "Prisma adapter should read asset entitlement snapshots");
+  expect((await repositories.image.getAsset(asset.id))?.commercialAuthorizationStatement === "Commercial authorization smoke", "Prisma adapter should read commercial authorization statements");
+  await repositories.image.updateAsset(asset.id, { downloadState: "hd" });
+  expect((await repositories.image.getAsset(asset.id))?.downloadState === "hd", "Prisma adapter should update assets");
+  await repositories.image.updateAsset(asset.id, { status: "failed", reviewStatus: "rejected" });
+  expect((await repositories.image.getAsset(asset.id))?.status === "failed", "Prisma adapter should map asset status patches through review status");
+  expect((await repositories.image.listAssets({ userId })).length === 1, "Prisma adapter should list assets");
+  const cleanupJob = await repositories.image.createAssetCleanupJob({
+    id: "cleanup-smoke",
+    assetId: asset.id,
+    objectKey: asset.objectKey,
+    reason: "soft_deleted",
+    scheduledAt: now.toISOString(),
+    createdAt: now.toISOString()
+  });
+  expect(cleanupJob.objectKey === asset.objectKey, "Prisma adapter should create asset cleanup jobs");
+
+  const makeRetentionAsset = (userId: string, index: number, createdAt: string): ImageAsset => ({
+    id: `retention-${index}`,
+    userId,
+    title: `Retention ${index}`,
+    taskId: `task-retention-${index}`,
+    taskType: "t2i",
+    status: "succeeded",
+    prompt: "retention",
+    imageUrl: `https://cdn.example.test/assets/retention-${index}.png`,
+    objectKey: `assets/retention/${randomUUID()}.png`,
+    publicUrl: `https://cdn.example.test/assets/retention-${index}.png`,
+    mimeType: "image/png",
+    sizeBytes: 1024,
+    width: 1024,
+    height: 1024,
+    reviewStatus: "approved",
+    downloadState: "not_downloaded",
+    modelProvider: "openai",
+    modelName: "gpt-image-2",
+    createdAt
+  });
+  const retentionStore = createMockDataStore();
+  retentionStore.users[0].memberStatus = "free";
+  const retentionUserId = retentionStore.users[0].id;
+  retentionStore.assets = [
+    ...Array.from({ length: 25 }, (_, index) => makeRetentionAsset(retentionUserId, index, new Date(now.getTime() - index * 60000).toISOString())),
+    makeRetentionAsset(retentionUserId, 99, new Date(now.getTime() - 8 * 86400000).toISOString())
+  ];
+  setRepositoriesForTesting(createMockRepositories(retentionStore));
+  const retainedAssets = await listAssets({}, retentionUserId);
+  expect(retainedAssets.assets.length === 20, "free user visible history should keep at most 20 assets");
+  expect(!retainedAssets.assets.some(item => item.id === "retention-99"), "free user visible history should hide assets older than 7 days");
+  const deletedRetentionAsset = await deleteAsset("retention-0", retentionUserId);
+  expect(typeof deletedRetentionAsset?.deletedAt === "string", "asset deletion should soft-delete with deletedAt");
+  expect(retentionStore.cleanupJobs.length === 1, "asset deletion should schedule a later cleanup job");
+  const afterDeleteAssets = await listAssets({}, retentionUserId);
+  expect(!afterDeleteAssets.assets.some(item => item.id === "retention-0"), "soft-deleted assets should be hidden from user-visible history");
+  setRepositoriesForTesting(undefined);
+
+  const generatedStore = createMockDataStore();
+  generatedStore.assets = [];
+  generatedStore.tasks = [{
+    id: "task-generated-storage",
+    userId: generatedStore.users[0].id,
+    taskType: "t2i",
+    status: "storing",
+    prompt: "generated storage",
+    requestPayload: {},
+    modelProvider: "openai",
+    modelName: "gpt-image-2",
+    chargedCredits: 10,
+    priority: 10,
+    resultAssetIds: [],
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString()
+  }];
+  setRepositoriesForTesting(createMockRepositories(generatedStore));
+  const generatedAsset = await storeGeneratedAsset({
+    task: generatedStore.tasks[0],
+    bytes: await sharp({ create: { width: 64, height: 48, channels: 3, background: "#0f766e" } }).png().toBuffer()
+  });
+  expect(generatedAsset.objectKey.startsWith(`assets/tasks/${generatedStore.tasks[0].id}/asset/`), "generated asset object keys should be task-scoped");
+  expect(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.png$/i.test(generatedAsset.objectKey), "generated asset object keys should include a UUID");
+  expect(generatedAsset.publicUrl.includes(generatedAsset.objectKey), "generated assets should store a public URL");
+  expect(generatedAsset.mimeType === "image/png" && generatedAsset.width === 64 && generatedAsset.height === 48 && generatedAsset.sizeBytes > 0, "generated asset records should store MIME type, size, width, and height");
+  expect(generatedStore.assets.some(item => item.id === generatedAsset.id), "generated asset storage should create an application-owned asset record");
+  setRepositoriesForTesting(undefined);
+
+  const runnerStore = createMockDataStore();
+  runnerStore.users[0].memberStatus = "credit_pack";
+  runnerStore.creditBuckets[0].remainingAmount = 100;
+  runnerStore.creditBuckets[0].originalAmount = 100;
+  runnerStore.tasks = [];
+  runnerStore.assets = [];
+  runnerStore.creditHolds = [];
+  runnerStore.ledgerEntries = [];
+  runnerStore.providerSubmissions = [];
+  runnerStore.providerResults = [];
+  setRepositoriesForTesting(createMockRepositories(runnerStore));
+  const runnerTask = await createTask({ taskType: "t2i", prompt: "runner success", count: 3, size: "512x512" }, runnerStore.users[0].id);
+  expect(runnerStore.providerSubmissions.length === 0, "task creation should queue work without calling the provider");
+  const completedRunnerTask = await runImageTask(runnerTask.id, runnerStore.users[0].id);
+  expect(runnerStore.providerSubmissions[0]?.providerMode === "sync", "runner seam should record synchronous provider submissions");
+  expect(completedRunnerTask?.status === "succeeded", "server runner should move approved provider output to succeeded");
+  expect(runnerStore.providerResults[0]?.status === "succeeded", "server runner should record provider success results");
+  expect(completedRunnerTask?.resultAssetIds.length === 3, "server runner should attach every approved provider output asset");
+  expect(runnerStore.assets.length === 3 && runnerStore.assets.every(asset => asset.reviewStatus === "approved"), "approved provider outputs should create approved visible assets");
+  expect(runnerStore.creditHolds[0]?.status === "spent", "approved provider output should convert the credit hold to spend");
+  expect(runnerStore.ledgerEntries.some(entry => entry.entryType === "spend"), "approved provider output should write spend ledger entries");
+  setRepositoriesForTesting(undefined);
+
+  const rejectedRunnerStore = createMockDataStore();
+  rejectedRunnerStore.users[0].memberStatus = "credit_pack";
+  rejectedRunnerStore.creditBuckets[0].remainingAmount = 100;
+  rejectedRunnerStore.creditBuckets[0].originalAmount = 100;
+  rejectedRunnerStore.tasks = [];
+  rejectedRunnerStore.assets = [];
+  rejectedRunnerStore.creditHolds = [];
+  rejectedRunnerStore.ledgerEntries = [];
+  rejectedRunnerStore.cleanupJobs = [];
+  rejectedRunnerStore.providerSubmissions = [];
+  rejectedRunnerStore.providerResults = [];
+  setRepositoriesForTesting(createMockRepositories(rejectedRunnerStore));
+  const rejectedRunnerTask = await createTask({ taskType: "t2i", prompt: "runner rejected placeholder", count: 1, size: "1x1" }, rejectedRunnerStore.users[0].id);
+  const failedRunnerTask = await runImageTask(rejectedRunnerTask.id, rejectedRunnerStore.users[0].id);
+  const visibleRejectedAssets = await listAssets({}, rejectedRunnerStore.users[0].id);
+  expect(failedRunnerTask?.status === "failed" && failedRunnerTask.errorCode === "OUTPUT_REJECTED", "rejected provider output should fail the task with output review metadata");
+  expect(rejectedRunnerStore.assets.length === 0, "rejected provider output should not create an ImageAsset");
+  expect(visibleRejectedAssets.assets.length === 0, "rejected provider output should not become visible in asset listings");
+  expect(rejectedRunnerStore.cleanupJobs[0]?.assetId === rejectedRunnerTask.id, "rejected provider output should schedule stored object cleanup against the task");
+  expect(rejectedRunnerStore.creditHolds[0]?.status === "released", "rejected provider output should release the credit hold");
+  expect(rejectedRunnerStore.ledgerEntries.some(entry => entry.entryType === "release"), "rejected provider output should write release ledger entries");
+  setRepositoriesForTesting(undefined);
+
+  const partialRejectStore = createMockDataStore();
+  partialRejectStore.users[0].memberStatus = "credit_pack";
+  partialRejectStore.creditBuckets[0].remainingAmount = 100;
+  partialRejectStore.creditBuckets[0].originalAmount = 100;
+  partialRejectStore.tasks = [];
+  partialRejectStore.assets = [];
+  partialRejectStore.creditHolds = [];
+  partialRejectStore.ledgerEntries = [];
+  partialRejectStore.cleanupJobs = [];
+  partialRejectStore.providerSubmissions = [];
+  partialRejectStore.providerResults = [];
+  setRepositoriesForTesting(createMockRepositories(partialRejectStore));
+  const previousExecutionForPartialReject = process.env.IMAGE_MODEL_EXECUTION;
+  const previousOpenAiApiKeyForPartialReject = process.env.OPENAI_API_KEY;
+  try {
+    const validOutput = await sharp({ create: { width: 64, height: 64, channels: 3, background: "#0f766e" } }).png().toBuffer();
+    const invalidDimensionOutput = await sharp({ create: { width: 1, height: 1, channels: 3, background: "#0f172a" } }).png().toBuffer();
+    process.env.IMAGE_MODEL_EXECUTION = "live";
+    process.env.OPENAI_API_KEY = "fake-key";
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      data: [
+        { b64_json: validOutput.toString("base64") },
+        { b64_json: invalidDimensionOutput.toString("base64") }
+      ]
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json", "x-request-id": "partial-reject-provider-request-1" }
+    });
+    const partialRejectTask = await createTask({ taskType: "t2i", prompt: "runner partial rejected output", count: 2, size: "64x64" }, partialRejectStore.users[0].id);
+    const failedPartialRejectTask = await runImageTask(partialRejectTask.id, partialRejectStore.users[0].id);
+    expect(failedPartialRejectTask?.status === "succeeded" && failedPartialRejectTask.resultAssetIds.length === 1, "partially rejected provider output should keep approved outputs");
+    expect(partialRejectStore.assets.length === 1 && partialRejectStore.assets[0]?.reviewStatus === "approved", "partially rejected provider output should create only approved visible assets");
+    expect(partialRejectStore.cleanupJobs.length === 1, "partially rejected provider output should clean up rejected stored outputs");
+    expect(partialRejectStore.creditHolds[0]?.status === "spent", "partially rejected provider output should settle the hold");
+    expect(partialRejectStore.ledgerEntries.some(entry => entry.entryType === "spend" && entry.amount === -10), "partially rejected provider output should spend approved-output credits");
+    expect(partialRejectStore.ledgerEntries.some(entry => entry.entryType === "release" && entry.amount === 10), "partially rejected provider output should release rejected-output credits");
+    expect(partialRejectStore.creditBuckets[0].remainingAmount === 90, "partially rejected provider output should restore only rejected-output credits");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousExecutionForPartialReject) process.env.IMAGE_MODEL_EXECUTION = previousExecutionForPartialReject;
+    else delete process.env.IMAGE_MODEL_EXECUTION;
+    if (previousOpenAiApiKeyForPartialReject) process.env.OPENAI_API_KEY = previousOpenAiApiKeyForPartialReject;
+    else delete process.env.OPENAI_API_KEY;
+    setRepositoriesForTesting(undefined);
+  }
+
+  const invalidFormatStore = createMockDataStore();
+  invalidFormatStore.users[0].memberStatus = "credit_pack";
+  invalidFormatStore.creditBuckets[0].remainingAmount = 100;
+  invalidFormatStore.creditBuckets[0].originalAmount = 100;
+  invalidFormatStore.tasks = [];
+  invalidFormatStore.assets = [];
+  invalidFormatStore.creditHolds = [];
+  invalidFormatStore.ledgerEntries = [];
+  invalidFormatStore.cleanupJobs = [];
+  invalidFormatStore.providerSubmissions = [];
+  invalidFormatStore.providerResults = [];
+  setRepositoriesForTesting(createMockRepositories(invalidFormatStore));
+  const previousExecutionForInvalidFormat = process.env.IMAGE_MODEL_EXECUTION;
+  const previousOpenAiApiKeyForInvalidFormat = process.env.OPENAI_API_KEY;
+  try {
+    process.env.IMAGE_MODEL_EXECUTION = "live";
+    process.env.OPENAI_API_KEY = "fake-key";
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      data: [{ b64_json: Buffer.from("not-an-image").toString("base64") }]
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json", "x-request-id": "invalid-format-provider-request-1" }
+    });
+    const invalidFormatTask = await createTask({ taskType: "t2i", prompt: "runner invalid provider format", count: 1, size: "64x64" }, invalidFormatStore.users[0].id);
+    const failedInvalidFormatTask = await runImageTask(invalidFormatTask.id, invalidFormatStore.users[0].id);
+    expect(failedInvalidFormatTask?.status === "failed" && failedInvalidFormatTask.errorCode === "OUTPUT_REJECTED", "invalid provider format should fail as output review rejection");
+    expect(failedInvalidFormatTask?.errorMessage?.includes("invalid provider output"), "invalid provider format should report output review rejection");
+    expect(invalidFormatStore.providerResults[0]?.status === "succeeded", "invalid provider format should still record provider success before review rejection");
+    expect(invalidFormatStore.assets.length === 0, "invalid provider format should not create visible assets");
+    expect(invalidFormatStore.creditHolds[0]?.status === "released", "invalid provider format should release the credit hold");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousExecutionForInvalidFormat) process.env.IMAGE_MODEL_EXECUTION = previousExecutionForInvalidFormat;
+    else delete process.env.IMAGE_MODEL_EXECUTION;
+    if (previousOpenAiApiKeyForInvalidFormat) process.env.OPENAI_API_KEY = previousOpenAiApiKeyForInvalidFormat;
+    else delete process.env.OPENAI_API_KEY;
+    setRepositoriesForTesting(undefined);
+  }
+
+  const unreadableOutputStore = createMockDataStore();
+  unreadableOutputStore.users[0].memberStatus = "credit_pack";
+  unreadableOutputStore.creditBuckets[0].remainingAmount = 100;
+  unreadableOutputStore.creditBuckets[0].originalAmount = 100;
+  unreadableOutputStore.tasks = [];
+  unreadableOutputStore.assets = [];
+  unreadableOutputStore.creditHolds = [];
+  unreadableOutputStore.ledgerEntries = [];
+  unreadableOutputStore.cleanupJobs = [];
+  unreadableOutputStore.providerSubmissions = [];
+  unreadableOutputStore.providerResults = [];
+  setRepositoriesForTesting(createMockRepositories(unreadableOutputStore));
+  const previousDataModeForReadCheck = process.env.FLUXART_DATA_MODE;
+  const previousEndpointForReadCheck = process.env.MINIO_ENDPOINT;
+  const previousBucketForReadCheck = process.env.MINIO_BUCKET;
+  const previousAccessKeyForReadCheck = process.env.MINIO_ACCESS_KEY;
+  const previousSecretKeyForReadCheck = process.env.MINIO_SECRET_KEY;
+  const previousExecutionForReadCheck = process.env.IMAGE_MODEL_EXECUTION;
+  const previousOpenAiApiKeyForReadCheck = process.env.OPENAI_API_KEY;
+  try {
+    const providerImage = await sharp({ create: { width: 64, height: 64, channels: 3, background: "#1d4ed8" } }).png().toBuffer();
+    process.env.FLUXART_DATA_MODE = "prisma";
+    process.env.MINIO_ENDPOINT = "https://minio.example.test";
+    process.env.MINIO_BUCKET = "fluxart-test";
+    process.env.MINIO_ACCESS_KEY = "access";
+    process.env.MINIO_SECRET_KEY = "secret";
+    process.env.IMAGE_MODEL_EXECUTION = "live";
+    process.env.OPENAI_API_KEY = "fake-key";
+    globalThis.fetch = async (_url, init) => {
+      if (init?.method === "POST") {
+        return new Response(JSON.stringify({ data: [{ b64_json: providerImage.toString("base64") }] }), {
+          status: 200,
+          headers: { "content-type": "application/json", "x-request-id": "read-check-provider-request-1" }
+        });
+      }
+      if (init?.method === "PUT") return new Response("", { status: 200 });
+      if (init?.method === "HEAD") return new Response("", { status: 404 });
+      return new Response("", { status: 500 });
+    };
+    const unreadableOutputTask = await createTask({ taskType: "t2i", prompt: "runner unreadable stored object", count: 1, size: "64x64" }, unreadableOutputStore.users[0].id);
+    const failedReadCheckTask = await runImageTask(unreadableOutputTask.id, unreadableOutputStore.users[0].id);
+    expect(failedReadCheckTask?.status === "failed" && failedReadCheckTask.errorCode === "OUTPUT_REJECTED", "unreadable stored provider output should fail output review");
+    expect(failedReadCheckTask?.errorMessage?.includes("unreadable stored file"), "output review should report unreadable stored files");
+    expect(unreadableOutputStore.assets.length === 0, "unreadable stored provider output should not create an ImageAsset");
+    expect(unreadableOutputStore.cleanupJobs[0]?.objectKey, "unreadable stored provider output should schedule object cleanup");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousDataModeForReadCheck) process.env.FLUXART_DATA_MODE = previousDataModeForReadCheck;
+    else delete process.env.FLUXART_DATA_MODE;
+    if (previousEndpointForReadCheck) process.env.MINIO_ENDPOINT = previousEndpointForReadCheck;
+    else delete process.env.MINIO_ENDPOINT;
+    if (previousBucketForReadCheck) process.env.MINIO_BUCKET = previousBucketForReadCheck;
+    else delete process.env.MINIO_BUCKET;
+    if (previousAccessKeyForReadCheck) process.env.MINIO_ACCESS_KEY = previousAccessKeyForReadCheck;
+    else delete process.env.MINIO_ACCESS_KEY;
+    if (previousSecretKeyForReadCheck) process.env.MINIO_SECRET_KEY = previousSecretKeyForReadCheck;
+    else delete process.env.MINIO_SECRET_KEY;
+    if (previousExecutionForReadCheck) process.env.IMAGE_MODEL_EXECUTION = previousExecutionForReadCheck;
+    else delete process.env.IMAGE_MODEL_EXECUTION;
+    if (previousOpenAiApiKeyForReadCheck) process.env.OPENAI_API_KEY = previousOpenAiApiKeyForReadCheck;
+    else delete process.env.OPENAI_API_KEY;
+    setRepositoriesForTesting(undefined);
+  }
+
+  const asyncRunnerStore = createMockDataStore();
+  asyncRunnerStore.tasks = [{
+    id: "task-async-runner",
+    userId: asyncRunnerStore.users[0].id,
+    taskType: "t2i",
+    status: "queued",
+    prompt: "async runner",
+    requestPayload: { providerMode: "async", externalTaskId: "external-async-runner", size: "1024x1024" },
+    modelProvider: "custom",
+    modelName: "external-image-model",
+    chargedCredits: 10,
+    priority: 10,
+    resultAssetIds: [],
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString()
+  }];
+  asyncRunnerStore.providerResults = [];
+  asyncRunnerStore.assets = [];
+  setRepositoriesForTesting(createMockRepositories(asyncRunnerStore));
+  const previousExecutionForAsync = process.env.IMAGE_MODEL_EXECUTION;
+  const previousBaseUrlForAsync = process.env.IMAGE_MODEL_BASE_URL;
+  const previousOpenAiApiKeyForAsync = process.env.OPENAI_API_KEY;
+  const previousAsyncResultTemplate = process.env.IMAGE_MODEL_ASYNC_RESULT_URL_TEMPLATE;
+  try {
+    const asyncProviderImage = await sharp({ create: { width: 1024, height: 1024, channels: 3, background: "#0f172a" } }).png().toBuffer();
+    let asyncResultReady = false;
+    process.env.IMAGE_MODEL_EXECUTION = "live";
+    process.env.IMAGE_MODEL_BASE_URL = "https://provider.example.test/v1";
+    process.env.IMAGE_MODEL_ASYNC_RESULT_URL_TEMPLATE = "https://provider.example.test/v1/images/jobs/{externalTaskId}";
+    process.env.OPENAI_API_KEY = "fake-key";
+    globalThis.fetch = async (_url, init) => {
+      if (init?.method === "GET" && asyncResultReady) {
+        return new Response(JSON.stringify({ data: [{ b64_json: asyncProviderImage.toString("base64") }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      return new Response(JSON.stringify({ data: [{}] }), {
+        status: 200,
+        headers: { "content-type": "application/json", "x-request-id": "async-provider-request-1" }
+      });
+    };
+    const pendingRunnerTask = await runImageTask("task-async-runner", asyncRunnerStore.users[0].id);
+    expect(pendingRunnerTask?.status === "running", "async provider tasks should remain running while external output is pending");
+    expect(asyncRunnerStore.providerResults[0]?.status === "pending", "async provider tasks should normalize pending provider results");
+    expect(asyncRunnerStore.assets.length === 0, "async pending provider output should not create visible assets");
+    asyncResultReady = true;
+    const completedAsyncTask = await runImageTask("task-async-runner", asyncRunnerStore.users[0].id);
+    expect(completedAsyncTask?.status === "succeeded", "async provider tasks should complete after result polling returns output");
+    expect(asyncRunnerStore.providerResults[0]?.status === "succeeded", "async provider success should record a succeeded provider result");
+    expect(asyncRunnerStore.assets[0]?.reviewStatus === "approved", "async provider success should create an approved asset");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousExecutionForAsync) process.env.IMAGE_MODEL_EXECUTION = previousExecutionForAsync;
+    else delete process.env.IMAGE_MODEL_EXECUTION;
+    if (previousBaseUrlForAsync) process.env.IMAGE_MODEL_BASE_URL = previousBaseUrlForAsync;
+    else delete process.env.IMAGE_MODEL_BASE_URL;
+    if (previousOpenAiApiKeyForAsync) process.env.OPENAI_API_KEY = previousOpenAiApiKeyForAsync;
+    else delete process.env.OPENAI_API_KEY;
+    if (previousAsyncResultTemplate) process.env.IMAGE_MODEL_ASYNC_RESULT_URL_TEMPLATE = previousAsyncResultTemplate;
+    else delete process.env.IMAGE_MODEL_ASYNC_RESULT_URL_TEMPLATE;
+    setRepositoriesForTesting(undefined);
+  }
+
+  const upload = await repositories.image.createUpload({
+    id: "upload-smoke",
+    userId,
+    kind: "source",
+    objectKey: "uploads/smoke/597bb7c3-2d55-4e25-b2fa-cad8a4f80d38.png",
+    publicUrl: "https://cdn.example.test/uploads/source.png",
+    mimeType: "image/png",
+    sizeBytes: 1024,
+    width: 1024,
+    height: 1024,
+    validationStatus: "accepted",
+    createdAt: now.toISOString()
+  });
+  expect((await repositories.image.listUploads(userId)).some(item => item.id === upload.id), "Prisma adapter should create/list uploads");
+
+  const submission = await repositories.image.createProviderSubmission({
+    id: "submission-smoke",
+    taskId: task.id,
+    provider: "openai",
+    modelName: "gpt-image-2",
+    providerMode: "sync",
+    requestMetadata: { prompt: "smoke" },
+    externalTaskId: "external-smoke",
+    createdAt: now.toISOString()
+  });
+  const providerResult = await repositories.image.createProviderResult({
+    id: "provider-result-smoke",
+    submissionId: submission.id,
+    status: "succeeded",
+    rawPayloadDigest: "digest",
+    outputMetadata: { count: 1 },
+    createdAt: now.toISOString()
+  });
+  expect(providerResult.submissionId === submission.id, "Prisma adapter should create provider submissions/results");
+
+  const order = await repositories.billing.createOrder({
+    userId,
+    planId: "credits-500" as BillingPlanId,
+    creditsAfterPayment: 550,
+    memberStatusAfterPayment: "credit_pack"
+  });
+  expect(order.outTradeNo, "Prisma adapter should create orders with outTradeNo");
+  expect((await repositories.billing.listOrders(userId)).length === 1, "Prisma adapter should list orders");
+  expect((await repositories.billing.getOrderByOutTradeNo(order.outTradeNo || ""))?.id === order.orderId, "Prisma adapter should read orders by outTradeNo");
+  await repositories.billing.updateOrder(order.orderId, { status: "paid" });
+  expect((await repositories.billing.getOrderByOutTradeNo(order.outTradeNo || ""))?.status === "paid", "Prisma adapter should update orders");
+
+  const notification = await repositories.billing.createPaymentNotification({
+    id: "notification-smoke",
+    orderId: order.orderId,
+    providerTradeNo: "provider-trade-smoke",
+    verified: true,
+    rawPayloadDigest: "notify-digest-smoke",
+    receivedAt: now.toISOString(),
+    processedAt: now.toISOString()
+  });
+  expect((await repositories.billing.getPaymentNotificationByDigest(order.orderId, notification.rawPayloadDigest))?.verified === true, "Prisma adapter should create/read payment notifications idempotently");
+
+  const fulfillOrder = await repositories.billing.createOrder({
+    userId,
+    planId: "credits-500" as BillingPlanId,
+    creditsAfterPayment: 550,
+    memberStatusAfterPayment: "credit_pack"
+  });
+  const fulfillmentNotification = {
+    id: "notification-fulfillment-smoke",
+    orderId: fulfillOrder.orderId,
+    providerTradeNo: "provider-trade-fulfillment-smoke",
+    verified: true,
+    rawPayloadDigest: "notify-digest-fulfillment-smoke",
+    receivedAt: now.toISOString(),
+    processedAt: now.toISOString()
+  };
+  const fulfillmentBucket = {
+    id: "bucket-fulfillment-smoke",
+    userId,
+    sourceType: "purchased" as const,
+    creditType: "purchased" as const,
+    originalAmount: 500,
+    remainingAmount: 500,
+    validFrom: now.toISOString(),
+    validUntil: new Date("2028-06-24T00:00:00.000Z").toISOString(),
+    priority: 90,
+    sourceOrderId: fulfillOrder.orderId,
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString()
+  };
+  const fulfillmentLedger = {
+    id: "ledger-fulfillment-smoke",
+    userId,
+    bucketId: fulfillmentBucket.id,
+    entryType: "grant" as const,
+    amount: 500,
+    balanceAfter: 1055,
+    sourceRefType: "credit_pack_order",
+    sourceRefId: fulfillOrder.orderId,
+    label: "Purchased Credit Pack",
+    createdAt: now.toISOString()
+  };
+  const fulfilledOrder = await repositories.billing.fulfillCreditPackOrder({
+    order: { id: fulfillOrder.orderId, userId, planId: fulfillOrder.planId, amountCents: fulfillOrder.amountCents || 2900, currency: "CNY", provider: "epay", outTradeNo: fulfillOrder.outTradeNo || "", status: "pending_payment", fulfillmentStatus: "pending", paymentUrl: fulfillOrder.paymentUrl, createdAt: fulfillOrder.createdAt, updatedAt: fulfillOrder.createdAt },
+    notification: fulfillmentNotification,
+    bucket: fulfillmentBucket,
+    ledgerEntry: fulfillmentLedger,
+    paidAt: now.toISOString()
+  });
+  expect(fulfilledOrder.order.status === "paid" && fulfilledOrder.order.fulfillmentStatus === "fulfilled", "credit pack fulfillment should mark orders paid and fulfilled");
+  expect((await repositories.credits.listBuckets(userId)).some(item => item.id === fulfillmentBucket.id), "credit pack fulfillment should create a purchased bucket");
+  expect((await repositories.credits.listLedgerEntries(userId)).some(entry => entry.id === fulfillmentLedger.id), "credit pack fulfillment should create a ledger grant");
+  const duplicateFulfillment = await repositories.billing.fulfillCreditPackOrder({
+    order: { id: fulfillOrder.orderId, userId, planId: fulfillOrder.planId, amountCents: fulfillOrder.amountCents || 2900, currency: "CNY", provider: "epay", outTradeNo: fulfillOrder.outTradeNo || "", status: "paid", fulfillmentStatus: "fulfilled", paymentUrl: fulfillOrder.paymentUrl, createdAt: fulfillOrder.createdAt, updatedAt: fulfillOrder.createdAt },
+    notification: fulfillmentNotification,
+    bucket: { ...fulfillmentBucket, id: "bucket-duplicate-fulfillment-smoke" },
+    ledgerEntry: { ...fulfillmentLedger, id: "ledger-duplicate-fulfillment-smoke", bucketId: "bucket-duplicate-fulfillment-smoke" },
+    paidAt: now.toISOString()
+  });
+  expect(duplicateFulfillment.duplicated, "duplicate payment notifications should be idempotent");
+  expect(!(await repositories.credits.listBuckets(userId)).some(item => item.id === "bucket-duplicate-fulfillment-smoke"), "duplicate payment notifications should not duplicate purchased buckets");
+
+  const cycle = await repositories.billing.createMembershipCycle({
+    id: "cycle-smoke",
+    userId,
+    planCode: "pro-monthly",
+    orderId: order.orderId,
+    cycleStart: now.toISOString(),
+    cycleEnd: new Date("2026-07-24T00:00:00.000Z").toISOString(),
+    status: "active",
+    hdDownloadsUsed: 0,
+    hdFairUseCap: 300,
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString()
+  });
+  expect(cycle.id === "cycle-smoke", "Prisma adapter should create membership cycles");
+  expect(delegates.membershipCycle.rows[0].planId === "plan-pro-monthly", "Prisma adapter should resolve membership plan code to durable plan id");
+  await repositories.billing.updateMembershipCycle(cycle.id, { hdDownloadsUsed: 1 });
+  expect((await repositories.billing.listMembershipCycles(userId)).find(item => item.id === cycle.id)?.hdDownloadsUsed === 1, "Prisma adapter should update/list membership cycles");
+  const consumedDownloadCycle = await repositories.billing.consumeMembershipDownload(cycle.id, now.toISOString());
+  expect(consumedDownloadCycle?.hdDownloadsUsed === 2, "Prisma adapter should atomically consume membership download allowance");
+  await repositories.billing.updateMembershipCycle(cycle.id, { hdDownloadsUsed: 300 });
+  expect((await repositories.billing.consumeMembershipDownload(cycle.id, now.toISOString())) === undefined, "membership download allowance should stop at the fair-use cap");
+
+  const futureStore = createMockDataStore();
+  const futureRepositories = createMockRepositories(futureStore);
+  const futureUser = await futureRepositories.auth.createRegistration({
+    user: { username: "future-cycle", displayName: "Future Cycle", memberStatus: "free" },
+    credential: {
+      id: "credential-future-cycle",
+      passwordHash: "hash",
+      hashVersion: "scrypt-v1",
+      passwordChangedAt: now.toISOString()
+    },
+    creditBucket: {
+      id: "bucket-future-cycle-registration",
+      sourceType: "registration",
+      creditType: "promotional",
+      originalAmount: 50,
+      remainingAmount: 50,
+      validFrom: now.toISOString(),
+      validUntil: new Date("2026-09-22T00:00:00.000Z").toISOString(),
+      priority: 10,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString()
+    },
+    ledgerEntry: {
+      id: "ledger-future-cycle-registration",
+      entryType: "grant",
+      amount: 50,
+      balanceAfter: 50,
+      sourceRefType: "registration",
+      label: "Registration Credit Grant",
+      createdAt: now.toISOString()
+    },
+    session: {
+      id: "session-future-cycle",
+      tokenHash: "future-cycle-token-hash",
+      slidingExpiresAt: new Date("2026-07-24T00:00:00.000Z").toISOString(),
+      absoluteExpiresAt: new Date("2026-09-22T00:00:00.000Z").toISOString(),
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString()
+    }
+  });
+  await futureRepositories.billing.createMembershipCycle({
+    id: "cycle-future-smoke",
+    userId: futureUser.user.id,
+    planCode: "pro-monthly",
+    cycleStart: new Date("2026-07-24T00:00:00.000Z").toISOString(),
+    cycleEnd: new Date("2026-08-24T00:00:00.000Z").toISOString(),
+    status: "active",
+    hdDownloadsUsed: 0,
+    hdFairUseCap: 300,
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString()
+  });
+  expect((await futureRepositories.account.getCurrentAccount(futureUser.user.id)).memberStatus === "free", "future membership cycles should not activate Pro before cycleStart");
+
+  const download = await repositories.billing.createDownloadEvent({
+    id: "download-smoke",
+    assetId: asset.id,
+    userId,
+    downloadType: "hd_no_watermark",
+    creditCost: 0,
+    proFairUseApplied: true,
+    membershipCycleId: cycle.id,
+    createdAt: now.toISOString()
+  });
+  expect((await repositories.billing.listDownloadEvents(userId)).some(item => item.id === download.id), "Prisma adapter should create/list download events");
+
+  setPrismaClientForTesting(undefined);
+}
+
+run().catch(error => {
+  process.stderr.write(`[smoke:repositories:runner] ${error instanceof Error ? error.stack || error.message : String(error)}\n`);
+  process.exitCode = 1;
+});

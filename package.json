@@ -10,13 +10,18 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "check:env": "node scripts/check-env.mjs",
+    "smoke:env": "node scripts/smoke-env.mjs",
+    "smoke:repositories": "node scripts/smoke-repositories.mjs",
+    "smoke:browser": "node scripts/smoke-browser.mjs",
     "smoke:api": "node scripts/smoke-api.mjs"
   },
   "dependencies": {
+    "@prisma/client": "6.19.0",
     "lucide-react": "1.21.0",
     "next": "16.2.9",
     "react": "19.2.7",
     "react-dom": "19.2.7",
+    "sharp": "0.34.5",
     "zustand": "5.0.14"
   },
   "devDependencies": {
@@ -25,6 +30,8 @@
     "@types/react-dom": "19.2.3",
     "eslint": "9.39.4",
     "eslint-config-next": "16.2.9",
+    "playwright": "^1.61.1",
+    "prisma": "6.19.0",
     "typescript": "6.0.3"
   }
 }

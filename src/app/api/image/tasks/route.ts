@@ -1,4 +1,7 @@
 import { createTask, getAsset, listTasks } from "@/server/image/business/image-service";
+import { getRequestSession, renewSessionCookie } from "@/server/auth/request-auth";
+import { CreditBalanceError } from "@/server/credits/credit-service";
+import { TaskCapabilityError, TaskConcurrencyError } from "@/server/image/business/task-policy";
 import { parseTaskListQuery } from "@/server/image/business/list-query";
 import { fail, ok } from "@/server/shared/api-response";
 import type { CreateImageTaskInput, GenerationMode } from "@/types/image";
@@ -12,10 +15,15 @@ export async function GET(request: Request) {
     return fail(parsedQuery.error.message, 400, parsedQuery.error.errorCode);
   }
 
-  return ok(await listTasks(parsedQuery.query));
+  const session = await getRequestSession();
+  if (!session) return fail("authentication is required", 401, "AUTH_REQUIRED");
+  return renewSessionCookie(ok(await listTasks(parsedQuery.query, session.account.userId)), session.sessionToken, session.session);
 }
 
 export async function POST(request: Request) {
+  const session = await getRequestSession();
+  if (!session) return fail("authentication is required", 401, "AUTH_REQUIRED");
+
   let body: Partial<CreateImageTaskInput>;
 
   try {
@@ -45,7 +53,7 @@ export async function POST(request: Request) {
       return fail("sourceAssetId is required for image editing tasks", 400, "SOURCE_ASSET_REQUIRED");
     }
 
-    const sourceAsset = await getAsset(body.sourceAssetId);
+    const sourceAsset = await getAsset(body.sourceAssetId, session.account.userId);
     if (!sourceAsset) {
       return fail("source asset was not found", 404, "SOURCE_ASSET_NOT_FOUND");
     }
@@ -60,13 +68,17 @@ export async function POST(request: Request) {
       size: body.size || "1024x1024",
       count: body.count || 4,
       stylePreset: body.stylePreset || "商业摄影",
-      strength: body.strength,
-      modelProvider: body.modelProvider,
-      modelName: body.modelName
-    });
+      strength: body.strength
+    }, session.account.userId);
 
-    return ok({ task });
+    return renewSessionCookie(ok({ task }), session.sessionToken, session.session);
   } catch (error) {
+    if (error instanceof CreditBalanceError) {
+      return fail(error.message, error.status, error.code);
+    }
+    if (error instanceof TaskCapabilityError || error instanceof TaskConcurrencyError) {
+      return fail(error.message, error.status, error.code);
+    }
     const message = error instanceof Error ? error.message : "model request failed";
     if (message.startsWith("Missing ")) {
       return fail(message, 500, "MODEL_AUTH_MISSING");

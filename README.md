@@ -12,12 +12,14 @@ licensed under the PolyForm Noncommercial License 1.0.0. See
 
 ```bash
 npm install
-npm run dev -- -p 3107
+npm run dev -- -H 127.0.0.1 -p 3107
 npm run check:env
+npm run smoke:env
 npm run typecheck
 npm run lint
 npm run build
 npm run smoke:api
+npm run smoke:browser
 ```
 
 Preview locally at `http://127.0.0.1:3107/workspace/image`.
@@ -37,6 +39,8 @@ SMOKE_BASE_URL=http://127.0.0.1:3107 npm run smoke:api
 - Override with `IMAGE_MODEL_PROVIDER`, `OPENAI_IMAGE_MODEL`, `IMAGE_MODEL_BASE_URL`, and custom provider settings in the server adapter layer.
 - Copy `.env.example` to `.env.local` for local overrides. Run `npm run check:env` before live-model testing.
 - Custom providers are expected to expose an OpenAI-compatible `/images/generations` API. Set `IMAGE_MODEL_PROVIDER=custom`, `IMAGE_MODEL_NAME`, `IMAGE_MODEL_BASE_URL`, `IMAGE_MODEL_API_KEY_SECRET_REF`, and the referenced secret value.
+
+Production launch steps, migration commands, rollback notes, and the required validation checklist are documented in [docs/launch-production-v1.md](./docs/launch-production-v1.md).
 
 ## Data Layer
 

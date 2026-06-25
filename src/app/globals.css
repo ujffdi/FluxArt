@@ -294,6 +294,8 @@ h1 { margin: 18px 0 12px; font: 650 46px/1.06 var(--font-display); letter-spacin
 .link-btn { border: 0; background: transparent; color: var(--accent-2); padding: 0; font-weight: 700; }
 .balance { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 24px; }
 .packs { display: grid; gap: 10px; }
+.pack { width: 100%; border: 1px solid var(--border); border-radius: 14px; background: var(--card-soft); color: inherit; padding: 12px; text-align: left; cursor: pointer; }
+.pack:hover { border-color: rgba(24, 214, 194, 0.44); }
 .plans { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 16px; }
 .plan { border: 1px solid var(--border); border-radius: 22px; background: var(--plan-bg); padding: 18px; display: grid; gap: 14px; color: var(--fg); }
 .plan.hot { border-color: rgba(124, 92, 255, 0.52); background: var(--plan-hot-bg); }

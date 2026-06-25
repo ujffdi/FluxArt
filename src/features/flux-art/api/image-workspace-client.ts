@@ -1,4 +1,5 @@
 import type { ApiResponse } from "@/types/api";
+import type { AuthAccount, AuthSession } from "@/types/auth";
 import type { BillingOrder, BillingPlanId } from "@/types/billing";
 import type {
   AccountCreditsSummary,
@@ -37,6 +38,11 @@ interface AssetListPayload {
 interface TaskListPayload {
   tasks: ImageGenerationTask[];
   pagination: PaginationMeta;
+}
+
+interface AuthSessionPayload {
+  account: AuthAccount;
+  session: AuthSession;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -109,6 +115,14 @@ export async function listImageTasks(query: ListImageTasksQuery = {}): Promise<T
   return requestApi<TaskListPayload>(`/api/image/tasks${toSearchParams(query)}`);
 }
 
+async function runImageTask(taskId: string): Promise<ImageGenerationTask> {
+  const payload = await requestApi<{ task: ImageGenerationTask }>(`/api/image/tasks/${taskId}`, {
+    method: "POST"
+  });
+
+  return payload.task;
+}
+
 export async function createImageTask(input: CreateImageTaskInput): Promise<ImageGenerationTask> {
   const payload = await requestApi<{ task: ImageGenerationTask }>("/api/image/tasks", {
     method: "POST",
@@ -116,7 +130,9 @@ export async function createImageTask(input: CreateImageTaskInput): Promise<Imag
     body: JSON.stringify(input)
   });
 
-  return payload.task;
+  if (payload.task.status !== "queued") return payload.task;
+
+  return runImageTask(payload.task.id);
 }
 
 export async function createDownloadDecision(assetId: string): Promise<DownloadDecision> {
@@ -127,14 +143,54 @@ export async function createDownloadDecision(assetId: string): Promise<DownloadD
   return payload.decision;
 }
 
+export async function deleteImageAsset(assetId: string): Promise<ImageAsset> {
+  const payload = await requestApi<{ asset: ImageAsset }>(`/api/image/assets/${assetId}`, {
+    method: "DELETE"
+  });
+
+  return payload.asset;
+}
+
 export async function createBillingOrder(planId: BillingPlanId): Promise<BillingOrder> {
-  const payload = await requestApi<{ order: BillingOrder }>("/api/billing/orders", {
+  const endpoint = planId === "pro-monthly" ? "/api/orders/membership" : "/api/orders/credits";
+  const payload = await requestApi<{ order: BillingOrder }>(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ planId })
   });
 
   return payload.order;
+}
+
+export async function listBillingOrders(): Promise<BillingOrder[]> {
+  const payload = await requestApi<{ orders: BillingOrder[] }>("/api/billing/orders");
+  return payload.orders;
+}
+
+export async function getCurrentAuthSession(): Promise<AuthSessionPayload> {
+  return requestApi<AuthSessionPayload>("/api/auth/me");
+}
+
+export async function loginWithPassword(username: string, password: string): Promise<AuthSessionPayload> {
+  return requestApi<AuthSessionPayload>("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password })
+  });
+}
+
+export async function registerAccount(username: string, password: string, displayName?: string): Promise<AuthSessionPayload> {
+  return requestApi<AuthSessionPayload>("/api/auth/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password, displayName })
+  });
+}
+
+export async function logoutCurrentSession(): Promise<void> {
+  await requestApi<{ loggedOut: boolean }>("/api/auth/logout", {
+    method: "POST"
+  });
 }
 
 export async function getAccountCredits(): Promise<AccountCreditsSummary> {

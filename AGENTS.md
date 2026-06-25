@@ -42,9 +42,9 @@ Write TypeScript and React function components. Use `.tsx` for UI components and
 For Next.js boundaries, keep secure operations, model calls, repository access, and secret-bearing environment variables on the server side. Keep browser-only APIs inside client components or effects.
 
 ## Data, Auth, and Runtime Defaults
-V1 runs without local database software. The current data layer is an in-memory mock repository behind `src/server/data/repositories.ts`; future database work should replace that adapter instead of changing page or API contracts.
+V1 runs without local database software by default. The default local data layer is an in-memory mock repository behind `src/server/data/repositories.ts`; production database work should replace or select that adapter instead of changing page or API contracts.
 
-Login is currently a front-end session simulation in `src/stores/image-workspace-store.ts` and `src/features/flux-art/flux-art-shell.tsx`. Account entitlement APIs exist for credits and membership summaries, but there is no production auth provider yet.
+Login uses self-declared username/password accounts with server-side password hashes and httpOnly session cookies. The front end reflects the server session state from auth APIs; there is no third-party production auth provider in V1.
 
 Default image generation is mock execution with provider `openai` and model `gpt-image-2`. Live model execution must keep API keys in server environment variables only.
 

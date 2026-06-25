@@ -4,17 +4,18 @@ export const generationModes = ["t2i", "i2i", "inpaint", "outpaint"] as const;
 
 export type TaskStatus =
   | "queued"
-  | "processing"
+  | "running"
+  | "storing"
   | "reviewing"
   | "succeeded"
   | "failed"
-  | "insufficient_credits";
+  | "refunded";
 
-export const taskStatuses = ["queued", "processing", "reviewing", "succeeded", "failed", "insufficient_credits"] as const;
+export const taskStatuses = ["queued", "running", "storing", "reviewing", "succeeded", "failed", "refunded"] as const;
 
-export type AssetStatus = "succeeded" | "reviewing" | "processing" | "failed" | "insufficient_credits";
+export type AssetStatus = "succeeded" | "reviewing" | "processing" | "failed";
 
-export const assetStatuses = ["succeeded", "reviewing", "processing", "failed", "insufficient_credits"] as const;
+export const assetStatuses = ["succeeded", "reviewing", "processing", "failed"] as const;
 
 export type ImageProvider = "openai" | "custom";
 
@@ -58,6 +59,8 @@ export interface ImageGenerationTask {
   modelName: string;
   sourceAssetId?: string;
   chargedCredits: number;
+  priority?: number;
+  creditHoldId?: string;
   resultAssetIds: string[];
   errorCode?: string;
   errorMessage?: string;
@@ -68,16 +71,27 @@ export interface ImageGenerationTask {
 
 export interface ImageAsset {
   id: string;
+  userId: string;
   title: string;
   taskId: string;
   taskType: GenerationMode;
   status: AssetStatus;
   prompt: string;
   imageUrl: string;
+  objectKey: string;
+  publicUrl: string;
+  mimeType: string;
+  sizeBytes: number;
+  width: number;
+  height: number;
+  reviewStatus: "pending" | "approved" | "rejected" | "skipped";
   sourceAssetId?: string;
   downloadState: "not_downloaded" | "watermarked" | "hd";
   modelProvider: ImageProvider | string;
   modelName: string;
+  entitlementSnapshot?: EntitlementSnapshot;
+  commercialAuthorizationStatement?: string;
+  deletedAt?: string;
   createdAt: string;
 }
 
@@ -97,9 +111,10 @@ export interface ImageAssetDetail {
 
 export interface AccountEntitlement {
   userId: string;
+  username?: string;
   displayName: string;
   credits: number;
-  memberStatus: "free" | "points" | "pro_trial" | "pro";
+  memberStatus: "free" | "credit_pack" | "pro_trial" | "pro";
   proDaysRemaining: number;
   canUseOutpaint: boolean;
   canDownloadHd: boolean;
@@ -110,6 +125,11 @@ export interface AccountCreditsSummary {
   userId: string;
   credits: number;
   estimatedStandardGenerations: number;
+  groups?: Array<{
+    label: string;
+    amount: number;
+    validUntil?: string;
+  }>;
   recentChanges: Array<{
     id: string;
     label: string;
@@ -126,6 +146,8 @@ export interface AccountMembershipSummary {
   canUseOutpaint: boolean;
   canDownloadHd: boolean;
   canDownloadWithoutWatermark: boolean;
+  includedHdDownloadsRemaining?: number;
+  commercialAuthorizationStatement?: string;
 }
 
 export interface CreateImageTaskInput {
@@ -148,5 +170,15 @@ export interface DownloadDecision {
   watermark: boolean;
   costCredits: number;
   reason: string;
+  requiresPayment?: boolean;
+  fairUseApplied?: boolean;
   downloadUrl?: string;
+}
+
+export interface EntitlementSnapshot {
+  memberStatus: AccountEntitlement["memberStatus"];
+  capturedAt: string;
+  canDownloadHd: boolean;
+  canDownloadWithoutWatermark: boolean;
+  commercialAuthorizationStatement?: string;
 }

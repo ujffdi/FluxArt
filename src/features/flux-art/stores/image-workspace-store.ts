@@ -17,6 +17,7 @@ interface ImageWorkspaceState {
   theme: ThemeName;
   toast: string;
   customSizeVisible: boolean;
+  generationCount: number;
   paintStrength: number;
   referenceStrength: number;
   setPage: (page: ProductPage) => void;
@@ -28,6 +29,7 @@ interface ImageWorkspaceState {
   showToast: (toast: string) => void;
   clearToast: () => void;
   setCustomSizeVisible: (visible: boolean) => void;
+  setGenerationCount: (count: number) => void;
   setPaintStrength: (value: number) => void;
   setReferenceStrength: (value: number) => void;
 }
@@ -44,10 +46,11 @@ export const useImageWorkspaceStore = create<ImageWorkspaceState>()(
       generationMode: "txt",
       editMode: "inpaint",
       selectedAssetId: "IMG-1832",
-      sessionState: "logged-in",
+      sessionState: "guest",
       theme: "dark",
       toast: "",
       customSizeVisible: false,
+      generationCount: 4,
       paintStrength: 58,
       referenceStrength: 62,
       setPage: page => set({ page }),
@@ -59,6 +62,7 @@ export const useImageWorkspaceStore = create<ImageWorkspaceState>()(
       showToast: toast => set({ toast }),
       clearToast: () => set({ toast: "" }),
       setCustomSizeVisible: customSizeVisible => set({ customSizeVisible }),
+      setGenerationCount: generationCount => set({ generationCount }),
       setPaintStrength: paintStrength => set({ paintStrength }),
       setReferenceStrength: referenceStrength => set({ referenceStrength })
     }),
@@ -68,9 +72,9 @@ export const useImageWorkspaceStore = create<ImageWorkspaceState>()(
         generationMode: state.generationMode,
         editMode: state.editMode,
         selectedAssetId: state.selectedAssetId,
-        sessionState: state.sessionState,
         theme: state.theme,
         customSizeVisible: state.customSizeVisible,
+        generationCount: state.generationCount,
         paintStrength: state.paintStrength,
         referenceStrength: state.referenceStrength
       })

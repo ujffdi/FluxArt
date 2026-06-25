@@ -1,6 +1,8 @@
 import { createMockOrder } from "@/server/billing/billing-service";
+import { billingPlanIds } from "@/server/billing/plans";
+import { getRequestSession, renewSessionCookie } from "@/server/auth/request-auth";
 import { fail, ok } from "@/server/shared/api-response";
-import { billingPlanIds, type BillingPlanId } from "@/types/billing";
+import type { BillingPlanId } from "@/types/billing";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -33,5 +35,7 @@ export async function createOrderResponse(
     return fail("planId is not supported by this order endpoint", 400, options.invalidPlanCode || "PLAN_ID_REQUIRED");
   }
 
-  return ok({ order: await createMockOrder(body.planId) });
+  const session = await getRequestSession();
+  if (!session) return fail("authentication is required", 401, "AUTH_REQUIRED");
+  return renewSessionCookie(ok({ order: await createMockOrder(body.planId, session.account.userId) }), session.sessionToken, session.session);
 }

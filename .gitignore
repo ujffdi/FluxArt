@@ -12,6 +12,7 @@ node_modules
 out
 dist
 dist-ssr
+.tmp
 tsconfig.tsbuildinfo
 *.local
 .codex/
