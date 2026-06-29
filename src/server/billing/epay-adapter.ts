@@ -3,15 +3,15 @@ import { createHash } from "node:crypto";
 type EpayParams = Record<string, string>;
 
 function configuredMerchantId() {
-  return process.env.EPAY_MERCHANT_ID || process.env.EPAY_PID || "mock-merchant";
+  return process.env.MAPAY_MERCHANT_ID || process.env.MAPAY_PID || process.env.EPAY_MERCHANT_ID || process.env.EPAY_PID || "mock-merchant";
 }
 
 function configuredSecret() {
-  return process.env.EPAY_SIGNING_SECRET || process.env.EPAY_SECRET || process.env.EPAY_KEY || "mock-epay-secret";
+  return process.env.MAPAY_SIGNING_SECRET || process.env.MAPAY_SECRET || process.env.MAPAY_KEY || process.env.EPAY_SIGNING_SECRET || process.env.EPAY_SECRET || process.env.EPAY_KEY || "mock-epay-secret";
 }
 
 function configuredApiUrl() {
-  return process.env.EPAY_API_URL || "";
+  return process.env.MAPAY_API_URL || process.env.EPAY_API_URL || "";
 }
 
 function sortedQuery(params: EpayParams) {
@@ -41,8 +41,8 @@ export function createEpayPaymentUrl(input: { outTradeNo: string; amountCents: n
     out_trade_no: input.outTradeNo,
     name: input.planName,
     money: formatEpayAmount(input.amountCents),
-    notify_url: process.env.EPAY_NOTIFY_URL || "http://127.0.0.1:3107/api/payments/epay/notify",
-    return_url: process.env.EPAY_RETURN_URL || "http://127.0.0.1:3107/workspace/billing"
+    notify_url: process.env.MAPAY_NOTIFY_URL || process.env.EPAY_NOTIFY_URL || "http://127.0.0.1:3107/api/payments/mapay/notify",
+    return_url: process.env.MAPAY_RETURN_URL || process.env.EPAY_RETURN_URL || "http://127.0.0.1:3107/workspace/billing"
   };
   const sign = signEpayParams(params);
   const query = new URLSearchParams({ ...params, sign, sign_type: "MD5" }).toString();
