@@ -9,6 +9,18 @@ const port = process.env.SMOKE_PORT || "3117";
 const baseUrl = explicitBaseUrl || `http://127.0.0.1:${port}`;
 const nextBin = "./node_modules/.bin/next";
 const buildMarker = ".next/BUILD_ID";
+const mockPaymentEnv = {
+  MAPAY_API_URL: "",
+  MAPAY_MERCHANT_ID: "mock-merchant",
+  MAPAY_SIGNING_SECRET: "mock-epay-secret",
+  MAPAY_NOTIFY_URL: `http://127.0.0.1:${port}/api/payments/mapay/notify`,
+  MAPAY_RETURN_URL: `http://127.0.0.1:${port}/workspace/billing`,
+  EPAY_API_URL: "",
+  EPAY_MERCHANT_ID: "mock-merchant",
+  EPAY_SIGNING_SECRET: "mock-epay-secret",
+  EPAY_NOTIFY_URL: `http://127.0.0.1:${port}/api/payments/epay/notify`,
+  EPAY_RETURN_URL: `http://127.0.0.1:${port}/workspace/billing`
+};
 
 let serverProcess;
 const cookieJar = new Map();
@@ -128,7 +140,12 @@ function startServerIfNeeded() {
   }
 
   serverProcess = spawn(nextBin, ["start", "-H", "127.0.0.1", "-p", port], {
-    env: { ...process.env, FLUXART_DATA_MODE: process.env.FLUXART_DATA_MODE || "mock" },
+    env: {
+      ...process.env,
+      ...mockPaymentEnv,
+      FLUXART_DATA_MODE: process.env.FLUXART_DATA_MODE || "mock",
+      IMAGE_MODEL_EXECUTION: "mock"
+    },
     stdio: ["ignore", "pipe", "pipe"]
   });
 
@@ -203,9 +220,9 @@ async function runSmoke() {
   expect(Array.isArray(assets.body.data.assets) && assets.body.data.assets.length >= 1, "list assets should return assets");
   expect(assets.body.data.pagination.total >= assets.body.data.assets.length, "list assets should include pagination totals");
 
-  const filteredAssets = await request("/api/image/assets?taskType=outpaint&status=processing&page=1&pageSize=2");
+  const filteredAssets = await request("/api/image/assets?taskType=i2i&status=processing&page=1&pageSize=2");
   expectStatus(filteredAssets, 200, "filtered assets");
-  expect(filteredAssets.body.data.assets.length === 1, "filtered assets should return the processing outpaint asset");
+  expect(filteredAssets.body.data.assets.length === 1, "filtered assets should return the processing image-to-image asset");
   expect(filteredAssets.body.data.assets[0].id === "IMG-2088", "filtered assets should match IMG-2088");
 
   const invalidAssetStatus = await request("/api/image/assets?status=bad_status");
@@ -232,7 +249,7 @@ async function runSmoke() {
   expect(Array.isArray(tasks.body.data.tasks), "list tasks should return an array");
   expect(tasks.body.data.pagination.total >= tasks.body.data.tasks.length, "list tasks should include pagination totals");
 
-  const filteredTasks = await request("/api/image/tasks?taskType=outpaint&status=running&page=1&pageSize=1");
+  const filteredTasks = await request("/api/image/tasks?taskType=i2i&status=running&page=1&pageSize=1");
   expectStatus(filteredTasks, 200, "filtered tasks");
   expect(filteredTasks.body.data.tasks.length === 1, "filtered tasks should return one item for pageSize=1");
   expect(filteredTasks.body.data.tasks[0].id === "TSK-240618-1105", "filtered tasks should match TSK-240618-1105");
@@ -254,8 +271,8 @@ async function runSmoke() {
     body: JSON.stringify({ taskType: "t2i", prompt: "api smoke task", count: 1, size: "1024x1024" })
   });
   expectStatus(createdTask, 200, "create task");
-  expect(createdTask.body.data.task.modelProvider === "openai", "create task should use openai provider by default");
-  expect(createdTask.body.data.task.modelName === "gpt-image-2", "create task should use gpt-image-2 by default");
+  expect(createdTask.body.data.task.modelProvider === "agnes", "create task should use agnes provider by default");
+  expect(createdTask.body.data.task.modelName === "agnes-image-2.1-flash", "create task should use agnes-image-2.1-flash by default");
   expect(createdTask.body.data.task.status === "queued", "created tasks should start in queued state");
   expect(createdTask.body.data.task.priority === 100, "pro trial task creation should store priority 100");
   expect(typeof createdTask.body.data.task.creditHoldId === "string", "created tasks should include a credit hold id");
@@ -269,17 +286,17 @@ async function runSmoke() {
 
   const missingSourceAssetTask = await request("/api/image/tasks", {
     method: "POST",
-    body: JSON.stringify({ taskType: "inpaint", prompt: "api smoke edit task", count: 1, size: "1024x1024" })
+    body: JSON.stringify({ taskType: "i2i", prompt: "api smoke source-based task", count: 1, size: "1024x1024" })
   });
-  expectStatus(missingSourceAssetTask, 400, "missing edit source asset");
-  expect(missingSourceAssetTask.body.data.errorCode === "SOURCE_ASSET_REQUIRED", "edit tasks should require a source asset");
+  expectStatus(missingSourceAssetTask, 400, "missing source asset");
+  expect(missingSourceAssetTask.body.data.errorCode === "SOURCE_ASSET_REQUIRED", "source-based tasks should require a source asset");
 
   const unknownSourceAssetTask = await request("/api/image/tasks", {
     method: "POST",
-    body: JSON.stringify({ taskType: "outpaint", prompt: "api smoke edit task", sourceAssetId: "NOPE", count: 1, size: "1024x1024" })
+    body: JSON.stringify({ taskType: "i2i", prompt: "api smoke source-based task", sourceAssetId: "NOPE", count: 1, size: "1024x1024" })
   });
-  expectStatus(unknownSourceAssetTask, 404, "unknown edit source asset");
-  expect(unknownSourceAssetTask.body.data.errorCode === "SOURCE_ASSET_NOT_FOUND", "edit tasks should validate source asset existence");
+  expectStatus(unknownSourceAssetTask, 404, "unknown source asset");
+  expect(unknownSourceAssetTask.body.data.errorCode === "SOURCE_ASSET_NOT_FOUND", "source-based tasks should validate source asset existence");
 
   const credits = await request("/api/account/credits");
   expectStatus(credits, 200, "account credits");

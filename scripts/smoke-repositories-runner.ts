@@ -56,8 +56,18 @@ function matchesWhere(record: DbRecord, where?: Record<string, unknown>): boolea
   return true;
 }
 
-function makeDelegate(initial: DbRecord[] = []) {
+function makeDelegate(initial: DbRecord[] = [], constraints: { maxStringLengths?: Record<string, number> } = {}) {
   const rows = [...initial];
+  const maxStringLengths = constraints.maxStringLengths || {};
+
+  function assertConstraints(data: DbRecord) {
+    for (const [key, value] of Object.entries(data)) {
+      const maxLength = maxStringLengths[key];
+      if (typeof value === "string" && maxLength !== undefined && value.length > maxLength) {
+        throw new Error(`value too long for ${key}: ${value.length} > ${maxLength}`);
+      }
+    }
+  }
 
   return {
     rows,
@@ -74,6 +84,7 @@ function makeDelegate(initial: DbRecord[] = []) {
     },
     async create(args: Record<string, unknown>) {
       const data = args.data as DbRecord;
+      assertConstraints(data);
       const row = { ...data, id: data.id || id("db"), createdAt: data.createdAt || new Date(), updatedAt: data.updatedAt || new Date() };
       rows.unshift(row);
       return row;
@@ -81,6 +92,7 @@ function makeDelegate(initial: DbRecord[] = []) {
     async update(args: Record<string, unknown>) {
       const row = rows.find(item => matchesWhere(item, args.where as Record<string, unknown>));
       if (!row) throw new Error(`record not found for ${JSON.stringify(args.where)}`);
+      assertConstraints(args.data as DbRecord);
       for (const [key, value] of Object.entries(args.data as DbRecord)) {
         if (value && typeof value === "object" && "increment" in value) {
           row[key] = Number(row[key] || 0) + Number((value as { increment: number }).increment);
@@ -138,7 +150,7 @@ async function run() {
     membershipPlan: makeDelegate([{ id: "plan-pro-monthly", code: "pro-monthly", displayName: "Pro", monthlyPriceCents: 6900, monthlyCreditGrant: 1000, hdFairUseCap: 300, active: true, createdAt: now, updatedAt: now }]),
     membershipCycle: makeDelegate([]),
     imageUpload: makeDelegate([]),
-    imageTask: makeDelegate([]),
+    imageTask: makeDelegate([], { maxStringLengths: { failureReason: 255 } }),
     providerSubmission: makeDelegate([]),
     providerResult: makeDelegate([]),
     imageAsset: makeDelegate([]),
@@ -381,19 +393,19 @@ async function run() {
   failureStore.creditHolds = [];
   setRepositoriesForTesting(createMockRepositories(failureStore));
   const previousImageModelExecution = process.env.IMAGE_MODEL_EXECUTION;
-  const previousOpenAiApiKey = process.env.OPENAI_API_KEY;
+  const previousFluxArtImageApiKey = process.env.FLUXART_IMAGE_API_KEY;
   process.env.IMAGE_MODEL_EXECUTION = "live";
-  delete process.env.OPENAI_API_KEY;
+  delete process.env.FLUXART_IMAGE_API_KEY;
   try {
     const providerFailureTask = await createTask({ taskType: "t2i", prompt: "provider failure", count: 1, size: "1024x1024" }, failureStore.users[0].id);
     const failedProviderTask = await runImageTask(providerFailureTask.id, failureStore.users[0].id);
     expect(failedProviderTask?.status === "failed", "provider failure should fail the queued runner task");
-    expect(failedProviderTask?.errorMessage?.includes("Missing OPENAI_API_KEY"), "provider failure should surface missing live key");
+    expect(failedProviderTask?.errorMessage?.includes("Missing FLUXART_IMAGE_API_KEY"), "provider failure should surface missing live key");
   } finally {
     if (previousImageModelExecution) process.env.IMAGE_MODEL_EXECUTION = previousImageModelExecution;
     else delete process.env.IMAGE_MODEL_EXECUTION;
-    if (previousOpenAiApiKey) process.env.OPENAI_API_KEY = previousOpenAiApiKey;
-    else delete process.env.OPENAI_API_KEY;
+    if (previousFluxArtImageApiKey) process.env.FLUXART_IMAGE_API_KEY = previousFluxArtImageApiKey;
+    else delete process.env.FLUXART_IMAGE_API_KEY;
     setRepositoriesForTesting(undefined);
   }
   expect(failureStore.tasks.length === 1, "provider failure should preserve the failed image task for inspection");
@@ -424,6 +436,25 @@ async function run() {
     expect(liveSubmission.provider === "custom" && liveSubmission.modelName === "custom-image-model", "custom provider env should configure the provider seam");
     expect(liveSubmission.modelName !== "client-requested-model", "server provider env should override client model input");
     expect(liveSubmission.providerMode === "sync" && liveSubmission.outputBytes && liveSubmission.outputBytes.length > 0, "OpenAI-compatible b64 output should normalize to synchronous provider bytes");
+
+    let agnesRequestBody: Record<string, unknown> | undefined;
+    process.env.IMAGE_MODEL_PROVIDER = "agnes";
+    process.env.IMAGE_MODEL_NAME = "agnes-image-2.1-flash";
+    process.env.IMAGE_MODEL_BASE_URL = "https://apihub.agnes-ai.com/v1";
+    globalThis.fetch = async (_url, init) => {
+      agnesRequestBody = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as Record<string, unknown>;
+      return new Response(JSON.stringify({ data: [{ b64_json: providerImage.toString("base64") }] }), {
+        status: 200,
+        headers: { "content-type": "application/json", "x-request-id": "agnes-request-1" }
+      });
+    };
+    const agnesSubmission = await submitImageGeneration({ taskType: "t2i", prompt: "agnes provider contract", count: 4, size: "16x16" });
+    expect(agnesSubmission.provider === "agnes" && agnesSubmission.modelName === "agnes-image-2.1-flash", "Agnes provider env should configure the image model seam");
+    expect(agnesRequestBody?.model === "agnes-image-2.1-flash", "Agnes requests should use the documented model name");
+    expect(agnesRequestBody?.prompt === "agnes provider contract", "Agnes requests should forward the task prompt to the image model");
+    expect(agnesRequestBody?.size === "16x16", "Agnes requests should forward the task size to the image model");
+    expect(!("n" in (agnesRequestBody || {})), "Agnes requests should not send undocumented n parameter");
+    expect((agnesRequestBody?.extra_body as Record<string, unknown> | undefined)?.response_format === "url", "Agnes requests should put response_format under extra_body");
   } finally {
     globalThis.fetch = originalFetch;
     if (previousExecutionForProvider) process.env.IMAGE_MODEL_EXECUTION = previousExecutionForProvider;
@@ -548,7 +579,23 @@ async function run() {
   expect((await repositories.image.getTask(task.id))?.id === task.id, "Prisma adapter should read a task");
   await repositories.image.updateTask(task.id, { status: "running" });
   expect((await repositories.image.getTask(task.id))?.status === "running", "Prisma adapter should update a task");
+  const updatedPayloadTask = await repositories.image.updateTask(task.id, {
+    requestPayload: {
+      size: "1024x1024",
+      externalTaskId: "external-smoke",
+      providerMode: "sync"
+    }
+  });
+  expect(updatedPayloadTask?.requestPayload.externalTaskId === "external-smoke", "Prisma adapter should map requestPayload updates to requestPayloadJson");
   expect((await repositories.image.listTasks({ userId })).length === 1, "Prisma adapter should list tasks");
+  const longFailureReason = `provider failed: ${"x".repeat(500)}`;
+  const failedTask = await repositories.image.updateTask(task.id, {
+    status: "failed",
+    errorMessage: longFailureReason
+  });
+  expect(failedTask?.status === "failed", "Prisma adapter should update failed tasks with provider errors");
+  expect((failedTask?.errorMessage?.length || 0) <= 255, "Prisma adapter should keep failure_reason within the database column limit");
+  expect(Boolean(delegates.imageTask.rows.find(row => row.id === task.id)?.failedAt), "Prisma adapter should stamp failedAt when tasks fail");
 
   const asset = await repositories.image.createAsset({
     id: "asset-smoke",
@@ -724,12 +771,12 @@ async function run() {
   partialRejectStore.providerResults = [];
   setRepositoriesForTesting(createMockRepositories(partialRejectStore));
   const previousExecutionForPartialReject = process.env.IMAGE_MODEL_EXECUTION;
-  const previousOpenAiApiKeyForPartialReject = process.env.OPENAI_API_KEY;
+  const previousFluxArtImageApiKeyForPartialReject = process.env.FLUXART_IMAGE_API_KEY;
   try {
     const validOutput = await sharp({ create: { width: 64, height: 64, channels: 3, background: "#0f766e" } }).png().toBuffer();
     const invalidDimensionOutput = await sharp({ create: { width: 1, height: 1, channels: 3, background: "#0f172a" } }).png().toBuffer();
     process.env.IMAGE_MODEL_EXECUTION = "live";
-    process.env.OPENAI_API_KEY = "fake-key";
+    process.env.FLUXART_IMAGE_API_KEY = "fake-key";
     globalThis.fetch = async () => new Response(JSON.stringify({
       data: [
         { b64_json: validOutput.toString("base64") },
@@ -752,8 +799,8 @@ async function run() {
     globalThis.fetch = originalFetch;
     if (previousExecutionForPartialReject) process.env.IMAGE_MODEL_EXECUTION = previousExecutionForPartialReject;
     else delete process.env.IMAGE_MODEL_EXECUTION;
-    if (previousOpenAiApiKeyForPartialReject) process.env.OPENAI_API_KEY = previousOpenAiApiKeyForPartialReject;
-    else delete process.env.OPENAI_API_KEY;
+    if (previousFluxArtImageApiKeyForPartialReject) process.env.FLUXART_IMAGE_API_KEY = previousFluxArtImageApiKeyForPartialReject;
+    else delete process.env.FLUXART_IMAGE_API_KEY;
     setRepositoriesForTesting(undefined);
   }
 
@@ -770,10 +817,10 @@ async function run() {
   invalidFormatStore.providerResults = [];
   setRepositoriesForTesting(createMockRepositories(invalidFormatStore));
   const previousExecutionForInvalidFormat = process.env.IMAGE_MODEL_EXECUTION;
-  const previousOpenAiApiKeyForInvalidFormat = process.env.OPENAI_API_KEY;
+  const previousFluxArtImageApiKeyForInvalidFormat = process.env.FLUXART_IMAGE_API_KEY;
   try {
     process.env.IMAGE_MODEL_EXECUTION = "live";
-    process.env.OPENAI_API_KEY = "fake-key";
+    process.env.FLUXART_IMAGE_API_KEY = "fake-key";
     globalThis.fetch = async () => new Response(JSON.stringify({
       data: [{ b64_json: Buffer.from("not-an-image").toString("base64") }]
     }), {
@@ -791,8 +838,8 @@ async function run() {
     globalThis.fetch = originalFetch;
     if (previousExecutionForInvalidFormat) process.env.IMAGE_MODEL_EXECUTION = previousExecutionForInvalidFormat;
     else delete process.env.IMAGE_MODEL_EXECUTION;
-    if (previousOpenAiApiKeyForInvalidFormat) process.env.OPENAI_API_KEY = previousOpenAiApiKeyForInvalidFormat;
-    else delete process.env.OPENAI_API_KEY;
+    if (previousFluxArtImageApiKeyForInvalidFormat) process.env.FLUXART_IMAGE_API_KEY = previousFluxArtImageApiKeyForInvalidFormat;
+    else delete process.env.FLUXART_IMAGE_API_KEY;
     setRepositoriesForTesting(undefined);
   }
 
@@ -814,7 +861,7 @@ async function run() {
   const previousAccessKeyForReadCheck = process.env.MINIO_ACCESS_KEY;
   const previousSecretKeyForReadCheck = process.env.MINIO_SECRET_KEY;
   const previousExecutionForReadCheck = process.env.IMAGE_MODEL_EXECUTION;
-  const previousOpenAiApiKeyForReadCheck = process.env.OPENAI_API_KEY;
+  const previousFluxArtImageApiKeyForReadCheck = process.env.FLUXART_IMAGE_API_KEY;
   try {
     const providerImage = await sharp({ create: { width: 64, height: 64, channels: 3, background: "#1d4ed8" } }).png().toBuffer();
     process.env.FLUXART_DATA_MODE = "prisma";
@@ -823,7 +870,7 @@ async function run() {
     process.env.MINIO_ACCESS_KEY = "access";
     process.env.MINIO_SECRET_KEY = "secret";
     process.env.IMAGE_MODEL_EXECUTION = "live";
-    process.env.OPENAI_API_KEY = "fake-key";
+    process.env.FLUXART_IMAGE_API_KEY = "fake-key";
     globalThis.fetch = async (_url, init) => {
       if (init?.method === "POST") {
         return new Response(JSON.stringify({ data: [{ b64_json: providerImage.toString("base64") }] }), {
@@ -855,8 +902,8 @@ async function run() {
     else delete process.env.MINIO_SECRET_KEY;
     if (previousExecutionForReadCheck) process.env.IMAGE_MODEL_EXECUTION = previousExecutionForReadCheck;
     else delete process.env.IMAGE_MODEL_EXECUTION;
-    if (previousOpenAiApiKeyForReadCheck) process.env.OPENAI_API_KEY = previousOpenAiApiKeyForReadCheck;
-    else delete process.env.OPENAI_API_KEY;
+    if (previousFluxArtImageApiKeyForReadCheck) process.env.FLUXART_IMAGE_API_KEY = previousFluxArtImageApiKeyForReadCheck;
+    else delete process.env.FLUXART_IMAGE_API_KEY;
     setRepositoriesForTesting(undefined);
   }
 
@@ -881,7 +928,7 @@ async function run() {
   setRepositoriesForTesting(createMockRepositories(asyncRunnerStore));
   const previousExecutionForAsync = process.env.IMAGE_MODEL_EXECUTION;
   const previousBaseUrlForAsync = process.env.IMAGE_MODEL_BASE_URL;
-  const previousOpenAiApiKeyForAsync = process.env.OPENAI_API_KEY;
+  const previousFluxArtImageApiKeyForAsync = process.env.FLUXART_IMAGE_API_KEY;
   const previousAsyncResultTemplate = process.env.IMAGE_MODEL_ASYNC_RESULT_URL_TEMPLATE;
   try {
     const asyncProviderImage = await sharp({ create: { width: 1024, height: 1024, channels: 3, background: "#0f172a" } }).png().toBuffer();
@@ -889,7 +936,7 @@ async function run() {
     process.env.IMAGE_MODEL_EXECUTION = "live";
     process.env.IMAGE_MODEL_BASE_URL = "https://provider.example.test/v1";
     process.env.IMAGE_MODEL_ASYNC_RESULT_URL_TEMPLATE = "https://provider.example.test/v1/images/jobs/{externalTaskId}";
-    process.env.OPENAI_API_KEY = "fake-key";
+    process.env.FLUXART_IMAGE_API_KEY = "fake-key";
     globalThis.fetch = async (_url, init) => {
       if (init?.method === "GET" && asyncResultReady) {
         return new Response(JSON.stringify({ data: [{ b64_json: asyncProviderImage.toString("base64") }] }), {
@@ -917,8 +964,8 @@ async function run() {
     else delete process.env.IMAGE_MODEL_EXECUTION;
     if (previousBaseUrlForAsync) process.env.IMAGE_MODEL_BASE_URL = previousBaseUrlForAsync;
     else delete process.env.IMAGE_MODEL_BASE_URL;
-    if (previousOpenAiApiKeyForAsync) process.env.OPENAI_API_KEY = previousOpenAiApiKeyForAsync;
-    else delete process.env.OPENAI_API_KEY;
+    if (previousFluxArtImageApiKeyForAsync) process.env.FLUXART_IMAGE_API_KEY = previousFluxArtImageApiKeyForAsync;
+    else delete process.env.FLUXART_IMAGE_API_KEY;
     if (previousAsyncResultTemplate) process.env.IMAGE_MODEL_ASYNC_RESULT_URL_TEMPLATE = previousAsyncResultTemplate;
     else delete process.env.IMAGE_MODEL_ASYNC_RESULT_URL_TEMPLATE;
     setRepositoriesForTesting(undefined);

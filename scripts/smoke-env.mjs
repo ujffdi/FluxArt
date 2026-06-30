@@ -22,16 +22,16 @@ const productionEnv = {
   MINIO_ACCESS_KEY: "minio-access-key",
   MINIO_SECRET_KEY: "minio-secret-key-123",
   IMAGE_MODEL_EXECUTION: "live",
-  IMAGE_MODEL_PROVIDER: "openai",
-  IMAGE_MODEL_NAME: "gpt-image-2",
-  IMAGE_MODEL_BASE_URL: "https://api.openai.com/v1",
-  IMAGE_MODEL_API_KEY_SECRET_REF: "OPENAI_API_KEY",
-  OPENAI_API_KEY: "sk-test-valid-for-env-smoke",
-  EPAY_API_URL: "https://pay.example.com",
-  EPAY_MERCHANT_ID: "merchant-123",
-  EPAY_SIGNING_SECRET: "epay-signing-secret-123",
-  EPAY_NOTIFY_URL: "https://app.example.com/api/payments/epay/notify",
-  EPAY_RETURN_URL: "https://app.example.com/workspace/billing"
+  IMAGE_MODEL_PROVIDER: "agnes",
+  IMAGE_MODEL_NAME: "agnes-image-2.1-flash",
+  IMAGE_MODEL_BASE_URL: "https://apihub.agnes-ai.com/v1",
+  IMAGE_MODEL_API_KEY_SECRET_REF: "FLUXART_IMAGE_API_KEY",
+  FLUXART_IMAGE_API_KEY: "agnes-test-valid-for-env-smoke",
+  MAPAY_API_URL: "https://mzf.mapay.cc",
+  MAPAY_MERCHANT_ID: "merchant-123",
+  MAPAY_SIGNING_SECRET: "mapay-signing-secret-123",
+  MAPAY_NOTIFY_URL: "https://app.example.com/api/payments/mapay/notify",
+  MAPAY_RETURN_URL: "https://app.example.com/workspace/billing"
 };
 
 const production = runCheck(productionEnv);
@@ -40,12 +40,15 @@ expect(production.status === 0, `production env should pass: ${production.stderr
 const missingSessionSecret = runCheck({ ...productionEnv, FLUXART_SESSION_SECRET: "" });
 expect(missingSessionSecret.status !== 0 && missingSessionSecret.stderr.includes("FLUXART_SESSION_SECRET"), "missing session secret should fail production env validation");
 
-const placeholderEpaySecret = runCheck({ ...productionEnv, EPAY_SIGNING_SECRET: "secret" });
-expect(placeholderEpaySecret.status !== 0 && placeholderEpaySecret.stderr.includes("EPAY_SIGNING_SECRET"), "placeholder Epay secret should fail env validation");
+const placeholderMapaySecret = runCheck({ ...productionEnv, MAPAY_SIGNING_SECRET: "secret" });
+expect(placeholderMapaySecret.status !== 0 && placeholderMapaySecret.stderr.includes("MAPAY_SIGNING_SECRET"), "placeholder MaPay secret should fail env validation");
 
 const incompleteCustomProvider = runCheck({
   ...productionEnv,
-  IMAGE_MODEL_PROVIDER: "custom"
+  IMAGE_MODEL_PROVIDER: "custom",
+  IMAGE_MODEL_NAME: "",
+  IMAGE_MODEL_BASE_URL: "",
+  IMAGE_MODEL_API_KEY_SECRET_REF: ""
 });
 expect(incompleteCustomProvider.status !== 0 && incompleteCustomProvider.stderr.includes("IMAGE_MODEL_NAME"), "live custom provider should require explicit custom provider settings");
 

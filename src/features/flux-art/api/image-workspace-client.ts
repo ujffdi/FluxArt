@@ -115,7 +115,7 @@ export async function listImageTasks(query: ListImageTasksQuery = {}): Promise<T
   return requestApi<TaskListPayload>(`/api/image/tasks${toSearchParams(query)}`);
 }
 
-async function runImageTask(taskId: string): Promise<ImageGenerationTask> {
+export async function runImageTask(taskId: string): Promise<ImageGenerationTask> {
   const payload = await requestApi<{ task: ImageGenerationTask }>(`/api/image/tasks/${taskId}`, {
     method: "POST"
   });
@@ -130,9 +130,7 @@ export async function createImageTask(input: CreateImageTaskInput): Promise<Imag
     body: JSON.stringify(input)
   });
 
-  if (payload.task.status !== "queued") return payload.task;
-
-  return runImageTask(payload.task.id);
+  return payload.task;
 }
 
 export async function createDownloadDecision(assetId: string): Promise<DownloadDecision> {

@@ -131,7 +131,7 @@ export async function getAssetDetail(assetId: string, userId?: string): Promise<
 
   const task = tasks.find(item => item.id === asset.taskId || item.resultAssetIds.includes(asset.id));
   const actions: ImageAssetDetail["availableActions"] = asset.status === "succeeded"
-    ? ["download", "image_to_image", "inpaint", "outpaint"]
+    ? ["download", "image_to_image"]
     : [];
 
   return {

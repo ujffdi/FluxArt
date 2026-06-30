@@ -63,6 +63,10 @@ async function getPrismaClient(): Promise<PrismaClientLike> {
   return prismaClientPromise;
 }
 
+async function runTransaction<T>(prisma: PrismaClientLike, fn: (client: PrismaClientLike) => Promise<T>) {
+  return prisma.$transaction ? prisma.$transaction(fn) : fn(prisma);
+}
+
 function toIso(value: RecordValue | undefined) {
   if (value instanceof Date) return value.toISOString();
   if (typeof value === "string") return value;
@@ -71,6 +75,21 @@ function toIso(value: RecordValue | undefined) {
 
 function asString(value: RecordValue | undefined, fallback = "") {
   return typeof value === "string" ? value : fallback;
+}
+
+function fitVarchar(value: string, maxLength: number) {
+  if (value.length <= maxLength) return value;
+  if (maxLength <= 3) return value.slice(0, maxLength);
+  return `${value.slice(0, maxLength - 3)}...`;
+}
+
+function imageTaskStatusTimestampField(status: string) {
+  if (status === "running") return "runningAt";
+  if (status === "storing") return "storingAt";
+  if (status === "reviewing") return "reviewingAt";
+  if (status === "succeeded") return "completedAt";
+  if (status === "failed" || status === "refunded") return "failedAt";
+  return undefined;
 }
 
 function asNumber(value: RecordValue | undefined, fallback = 0) {
@@ -328,10 +347,25 @@ export function createPrismaRepositories(): AppRepositories {
         const data: Record<string, unknown> = { ...patch };
         if (patch.status) {
           data.state = patch.status;
+          const timestampField = imageTaskStatusTimestampField(patch.status);
+          if (timestampField) data[timestampField] = new Date();
           delete data.status;
         }
+        if (patch.requestPayload && typeof patch.requestPayload === "object") {
+          data.requestPayloadJson = patch.requestPayload;
+          delete data.requestPayload;
+        }
+        if (typeof patch.errorMessage === "string") {
+          data.failureReason = fitVarchar(patch.errorMessage, 255);
+        }
+        delete data.errorCode;
+        delete data.errorMessage;
         delete data.resultAssetIds;
-        const record = await prisma.imageTask.update?.({ where: { id: taskId }, data });
+        const record = await prisma.imageTask.update?.({
+          where: { id: taskId },
+          data,
+          include: { assets: { select: { id: true } } }
+        });
         return record ? taskFromRecord(record) : undefined;
       },
       async listVersionNodes() {
@@ -523,9 +557,7 @@ export function createPrismaRepositories(): AppRepositories {
       },
       async createRegistration(input) {
         const prisma = await getPrismaClient();
-        const run = prisma.$transaction || (async fn => fn(prisma));
-
-        return run(async tx => {
+        return runTransaction(prisma, async tx => {
           const userRecord = await tx.user.create({
             data: {
               displayName: input.user.displayName,
@@ -692,6 +724,8 @@ export function createPrismaRepositories(): AppRepositories {
       },
       async consumeRateLimit(input) {
         const prisma = await getPrismaClient();
+        const now = new Date(input.now);
+        const resetAt = new Date(input.resetAt);
         if (prisma.$executeRawUnsafe && prisma.$queryRawUnsafe) {
           await prisma.$executeRawUnsafe(
             `INSERT INTO auth_rate_limit_buckets (id, scope, count, reset_at, updated_at)
@@ -702,10 +736,10 @@ export function createPrismaRepositories(): AppRepositories {
                updated_at = VALUES(updated_at)`,
             `rate-${randomUUID()}`,
             input.scope,
-            input.resetAt,
-            input.now,
-            input.now,
-            input.now
+            resetAt,
+            now,
+            now,
+            now
           );
           const [record] = await prisma.$queryRawUnsafe(
             "SELECT id, scope, count, reset_at AS resetAt, updated_at AS updatedAt FROM auth_rate_limit_buckets WHERE scope = ? LIMIT 1",
@@ -728,14 +762,14 @@ export function createPrismaRepositories(): AppRepositories {
             const record = existing
               ? await prisma.authRateLimitBucket.update?.({
               where: { scope: input.scope },
-              data: { count: 1, resetAt: input.resetAt, updatedAt: input.now }
+              data: { count: 1, resetAt, updatedAt: now }
               })
               : await prisma.authRateLimitBucket.create({
               data: {
                 scope: input.scope,
                 count: 1,
-                resetAt: input.resetAt,
-                updatedAt: input.now
+                resetAt,
+                updatedAt: now
               }
               });
             return {
@@ -749,7 +783,7 @@ export function createPrismaRepositories(): AppRepositories {
           } catch {
             const record = await prisma.authRateLimitBucket.update?.({
               where: { scope: input.scope },
-              data: { count: { increment: 1 }, updatedAt: input.now }
+              data: { count: { increment: 1 }, updatedAt: now }
             });
             const count = asNumber(record?.count);
             return {
@@ -831,9 +865,9 @@ export function createPrismaRepositories(): AppRepositories {
       },
       async reserveCredits(input) {
         const prisma = await getPrismaClient();
-        const run = prisma.$transaction || (async fn => fn(prisma));
-        return run(async tx => {
+        return runTransaction(prisma, async tx => {
           const now = input.now;
+          const nowDate = new Date(input.now);
           const rawBuckets = tx.$queryRawUnsafe
             ? await tx.$queryRawUnsafe(
               `SELECT id, user_id AS userId, source_type AS sourceType, credit_type AS creditType,
@@ -844,10 +878,10 @@ export function createPrismaRepositories(): AppRepositories {
                FROM credit_buckets
                WHERE user_id = ? AND remaining_amount > 0 AND valid_from <= ? AND (valid_until IS NULL OR valid_until > ?)
                ORDER BY priority ASC, COALESCE(valid_until, '9999-12-31') ASC, created_at ASC
-               FOR UPDATE`,
+              FOR UPDATE`,
               input.userId,
-              now,
-              now
+              nowDate,
+              nowDate
             )
             : await tx.creditBucket.findMany({ where: { userId: input.userId } });
           const buckets = rawBuckets
@@ -881,7 +915,7 @@ export function createPrismaRepositories(): AppRepositories {
               await tx.$executeRawUnsafe(
                 "UPDATE credit_buckets SET remaining_amount = remaining_amount - ?, updated_at = ? WHERE id = ?",
                 deduction,
-                input.now,
+                nowDate,
                 bucket.id
               );
             } else {
@@ -911,8 +945,7 @@ export function createPrismaRepositories(): AppRepositories {
       },
       async finalizeHoldSpend(input) {
         const prisma = await getPrismaClient();
-        const run = prisma.$transaction || (async fn => fn(prisma));
-        return run(async tx => {
+        return runTransaction(prisma, async tx => {
           const holdRecord = await tx.creditHold.findUnique?.({ where: { id: input.holdId } });
           if (!holdRecord || asString(holdRecord.status) !== "active") return undefined;
           const hold = {
@@ -959,8 +992,8 @@ export function createPrismaRepositories(): AppRepositories {
       },
       async settleHoldPartially(input) {
         const prisma = await getPrismaClient();
-        const run = prisma.$transaction || (async fn => fn(prisma));
-        return run(async tx => {
+        return runTransaction(prisma, async tx => {
+          const nowDate = new Date(input.now);
           const holdRecord = await tx.creditHold.findUnique?.({ where: { id: input.holdId } });
           if (!holdRecord || asString(holdRecord.status) !== "active") return undefined;
           const hold = {
@@ -1012,7 +1045,7 @@ export function createPrismaRepositories(): AppRepositories {
             if (releaseAmount > 0) {
               if (bucketId) {
                 if (tx.$executeRawUnsafe) {
-                  await tx.$executeRawUnsafe("UPDATE credit_buckets SET remaining_amount = remaining_amount + ?, updated_at = ? WHERE id = ?", releaseAmount, input.now, bucketId);
+                  await tx.$executeRawUnsafe("UPDATE credit_buckets SET remaining_amount = remaining_amount + ?, updated_at = ? WHERE id = ?", releaseAmount, nowDate, bucketId);
                 } else {
                   await tx.creditBucket.update?.({ where: { id: bucketId }, data: { remainingAmount: { increment: releaseAmount }, updatedAt: input.now } });
                 }
@@ -1042,8 +1075,8 @@ export function createPrismaRepositories(): AppRepositories {
       },
       async releaseHold(input) {
         const prisma = await getPrismaClient();
-        const run = prisma.$transaction || (async fn => fn(prisma));
-        return run(async tx => {
+        return runTransaction(prisma, async tx => {
+          const nowDate = new Date(input.now);
           const holdRecord = await tx.creditHold.findUnique?.({ where: { id: input.holdId } });
           if (!holdRecord || asString(holdRecord.status) !== "active") return undefined;
           const hold = {
@@ -1074,7 +1107,7 @@ export function createPrismaRepositories(): AppRepositories {
               await tx.$executeRawUnsafe(
                 "UPDATE credit_buckets SET remaining_amount = remaining_amount + ?, updated_at = ? WHERE id = ?",
                 releaseAmount,
-                input.now,
+                nowDate,
                 bucketId
               );
             } else {
@@ -1105,8 +1138,8 @@ export function createPrismaRepositories(): AppRepositories {
       },
       async refundHold(input) {
         const prisma = await getPrismaClient();
-        const run = prisma.$transaction || (async fn => fn(prisma));
-        return run(async tx => {
+        return runTransaction(prisma, async tx => {
+          const nowDate = new Date(input.now);
           const holdRecord = await tx.creditHold.findUnique?.({ where: { id: input.holdId } });
           if (!holdRecord || asString(holdRecord.status) !== "spent") return undefined;
           const hold = {
@@ -1138,7 +1171,7 @@ export function createPrismaRepositories(): AppRepositories {
               await tx.$executeRawUnsafe(
                 "UPDATE credit_buckets SET remaining_amount = remaining_amount + ?, updated_at = ? WHERE id = ?",
                 refundAmount,
-                input.now,
+                nowDate,
                 bucketId
               );
             } else {
@@ -1169,8 +1202,8 @@ export function createPrismaRepositories(): AppRepositories {
       },
       async createAdjustment(input) {
         const prisma = await getPrismaClient();
-        const run = prisma.$transaction || (async fn => fn(prisma));
-        return run(async tx => {
+        return runTransaction(prisma, async tx => {
+          const nowDate = new Date(input.now);
           const rawBuckets = tx.$queryRawUnsafe
             ? await tx.$queryRawUnsafe(
               `SELECT id, user_id AS userId, source_type AS sourceType, credit_type AS creditType,
@@ -1181,10 +1214,10 @@ export function createPrismaRepositories(): AppRepositories {
                FROM credit_buckets
                WHERE user_id = ? AND remaining_amount > 0 AND valid_from <= ? AND (valid_until IS NULL OR valid_until > ?)
                ORDER BY priority ASC, COALESCE(valid_until, '9999-12-31') ASC, created_at ASC
-               FOR UPDATE`,
+              FOR UPDATE`,
               input.userId,
-              input.now,
-              input.now
+              nowDate,
+              nowDate
             )
             : await tx.creditBucket.findMany({ where: { userId: input.userId } });
           const buckets = rawBuckets
@@ -1237,7 +1270,7 @@ export function createPrismaRepositories(): AppRepositories {
               await tx.$executeRawUnsafe(
                 "UPDATE credit_buckets SET remaining_amount = remaining_amount - ?, updated_at = ? WHERE id = ?",
                 deduction,
-                input.now,
+                nowDate,
                 bucket.id
               );
             } else {
@@ -1393,8 +1426,7 @@ export function createPrismaRepositories(): AppRepositories {
       },
       async fulfillCreditPackOrder(input) {
         const prisma = await getPrismaClient();
-        const run = prisma.$transaction || (async fn => fn(prisma));
-        return run(async tx => {
+        return runTransaction(prisma, async tx => {
           const existingNotification = await tx.paymentNotification.findFirst?.({
             where: { orderId: input.order.id }
           });
@@ -1503,8 +1535,7 @@ export function createPrismaRepositories(): AppRepositories {
       },
       async fulfillMembershipOrder(input) {
         const prisma = await getPrismaClient();
-        const run = prisma.$transaction || (async fn => fn(prisma));
-        return run(async tx => {
+        return runTransaction(prisma, async tx => {
           const existingNotification = await tx.paymentNotification.findFirst?.({
             where: { orderId: input.order.id }
           });

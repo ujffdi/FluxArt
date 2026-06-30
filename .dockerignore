@@ -1,0 +1,12 @@
+.DS_Store
+.codex
+.env
+.env.*
+!.env.example
+.git
+.next
+coverage
+dist
+node_modules
+npm-debug.log*
+deploy/certs

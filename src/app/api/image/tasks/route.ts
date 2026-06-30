@@ -50,7 +50,7 @@ export async function POST(request: Request) {
 
   if (body.taskType !== "t2i") {
     if (!body.sourceAssetId) {
-      return fail("sourceAssetId is required for image editing tasks", 400, "SOURCE_ASSET_REQUIRED");
+      return fail("sourceAssetId is required for source-based image tasks", 400, "SOURCE_ASSET_REQUIRED");
     }
 
     const sourceAsset = await getAsset(body.sourceAssetId, session.account.userId);

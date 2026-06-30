@@ -58,11 +58,11 @@ export const assets: ImageAsset[] = [
   {
     id: "IMG-1944",
     userId: account.userId,
-    title: "背景局部重绘",
-    taskId: "INP-240618-1011",
-    taskType: "inpaint",
+    title: "背景风格变体",
+    taskId: "I2I-240618-1011",
+    taskType: "i2i",
     status: "succeeded",
-    prompt: "将左侧背景替换为深色岩石台面",
+    prompt: "保持主体结构，替换背景为深色岩石台面",
     imageUrl: "/flux-art-reference.png",
     objectKey: "assets/demo/41c6d84b-6a23-4a11-ad9f-58350dd80c41.png",
     publicUrl: "/flux-art-reference.png",
@@ -80,11 +80,11 @@ export const assets: ImageAsset[] = [
   {
     id: "IMG-2012",
     userId: account.userId,
-    title: "横版扩图任务",
-    taskId: "OUT-240618-1030",
-    taskType: "outpaint",
+    title: "横版海报变体",
+    taskId: "I2I-240618-1030",
+    taskType: "i2i",
     status: "failed",
-    prompt: "向左右延展摄影棚背景",
+    prompt: "参考源图生成横版营销素材",
     imageUrl: "/flux-art-reference.png",
     objectKey: "assets/demo/02954981-b3f9-49bb-9f53-e66db1ea2e4e.png",
     publicUrl: "/flux-art-reference.png",
@@ -96,7 +96,7 @@ export const assets: ImageAsset[] = [
     sourceAssetId: "IMG-1832",
     downloadState: "not_downloaded",
     modelProvider: "custom",
-    modelName: "studio-outpaint-v1",
+    modelName: "gpt-image-2",
     createdAt: "今天 10:30"
   },
   {
@@ -123,11 +123,11 @@ export const assets: ImageAsset[] = [
   {
     id: "IMG-2088",
     userId: account.userId,
-    title: "办公空间扩展",
-    taskId: "OUT-240618-1105",
-    taskType: "outpaint",
+    title: "办公空间变体",
+    taskId: "I2I-240618-1105",
+    taskType: "i2i",
     status: "processing",
-    prompt: "扩展办公空间和窗外自然光",
+    prompt: "参考源图生成办公空间和自然光氛围",
     imageUrl: "/flux-art-reference.png",
     objectKey: "assets/demo/9292b2d5-f743-4773-8051-3f8bdbbf7205.png",
     publicUrl: "/flux-art-reference.png",
@@ -163,10 +163,10 @@ export const tasks: ImageGenerationTask[] = [
   {
     id: "TSK-240618-1105",
     userId: account.userId,
-    taskType: "outpaint",
+    taskType: "i2i",
     status: "running",
-    prompt: "保持同一摄影棚光线，延展背景材质和阴影",
-    requestPayload: { direction: "left-right", ratio: "1.5x" },
+    prompt: "参考源图生成办公空间和自然光氛围",
+    requestPayload: { size: "1344x768", count: 1 },
     modelProvider: "openai",
     modelName: "gpt-image-2",
     sourceAssetId: "IMG-2048",
@@ -181,6 +181,6 @@ export const tasks: ImageGenerationTask[] = [
 
 export const versionNodes: AssetVersionNode[] = [
   { id: "v1", label: "原始 Prompt：暗色背景商业摄影", assetId: "IMG-1832" },
-  { id: "v2", label: "局部重绘 V2：替换背景材质", assetId: "IMG-1944" },
-  { id: "v3", label: "扩图 V3：横版营销素材", assetId: "IMG-2012" }
+  { id: "v2", label: "图生图 V2：替换背景材质", assetId: "IMG-1944" },
+  { id: "v3", label: "图生图 V3：横版营销素材", assetId: "IMG-2012" }
 ];

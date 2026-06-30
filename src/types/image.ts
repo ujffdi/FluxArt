@@ -17,7 +17,7 @@ export type AssetStatus = "succeeded" | "reviewing" | "processing" | "failed";
 
 export const assetStatuses = ["succeeded", "reviewing", "processing", "failed"] as const;
 
-export type ImageProvider = "openai" | "custom";
+export type ImageProvider = "openai" | "agnes" | "custom";
 
 export interface PaginationQuery {
   page?: number;
@@ -106,7 +106,7 @@ export interface ImageAssetDetail {
   task?: ImageGenerationTask;
   versionNodes: AssetVersionNode[];
   downloadDecision: DownloadDecision;
-  availableActions: Array<"download" | "image_to_image" | "inpaint" | "outpaint">;
+  availableActions: Array<"download" | "image_to_image">;
 }
 
 export interface AccountEntitlement {

@@ -22,6 +22,49 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function requestTimeoutMs() {
+  const configured = Number(process.env.IMAGE_MODEL_REQUEST_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : 120000;
+}
+
+function buildLiveGenerationBody(input: CreateImageTaskInput, modelName: string, provider: string) {
+  const body: Record<string, unknown> = {
+    model: modelName,
+    prompt: input.prompt,
+    size: input.size || "1024x1024"
+  };
+
+  if (provider === "agnes") {
+    body.extra_body = {
+      response_format: "url"
+    };
+  } else {
+    body.n = input.count || 1;
+  }
+
+  return body;
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, label: string) {
+  const timeoutMs = requestTimeoutMs();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: init.signal || controller.signal
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`${label} timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function createMockOutput(input: CreateImageTaskInput, index = 0) {
   const [width, height] = String(input.size || "1024x1024").split("x").map(value => Number(value));
   const backgrounds = input.taskType === "outpaint"
@@ -51,7 +94,7 @@ async function outputBytesFromPayload(payload: unknown, provider: string) {
     if (b64Json) {
       outputBytesList.push(Buffer.from(b64Json, "base64"));
     } else if (outputUrl) {
-      const outputResponse = await fetch(outputUrl);
+      const outputResponse = await fetchWithTimeout(outputUrl, {}, `${provider} image output download`);
       if (!outputResponse.ok) {
         throw new Error(`${provider} image output download failed: ${outputResponse.status} ${await outputResponse.text()}`);
       }
@@ -68,24 +111,19 @@ export async function submitImageGeneration(input: CreateImageTaskInput): Promis
   const modelName = config.model;
 
   if (config.executionMode === "live") {
-    const apiKey = process.env[config.apiKeySecretRef || "OPENAI_API_KEY"];
+    const apiKey = process.env[config.apiKeySecretRef || "FLUXART_IMAGE_API_KEY"];
     if (!apiKey) {
-      throw new Error(`Missing ${config.apiKeySecretRef || "OPENAI_API_KEY"} for live ${provider} image generation`);
+      throw new Error(`Missing ${config.apiKeySecretRef || "FLUXART_IMAGE_API_KEY"} for live ${provider} image generation`);
     }
 
-    const response = await fetch(`${config.baseUrl}/images/generations`, {
+    const response = await fetchWithTimeout(`${config.baseUrl}/images/generations`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`
       },
-      body: JSON.stringify({
-        model: modelName,
-        prompt: input.prompt,
-        size: input.size || "1024x1024",
-        n: input.count || 1
-      })
-    });
+      body: JSON.stringify(buildLiveGenerationBody(input, modelName, provider))
+    }, `${provider} image generation`);
 
     if (!response.ok) {
       throw new Error(`${provider} image generation failed: ${response.status} ${await response.text()}`);
@@ -97,7 +135,7 @@ export async function submitImageGeneration(input: CreateImageTaskInput): Promis
     return {
       provider,
       modelName,
-      externalTaskId: response.headers.get("x-request-id") || `OPENAI-${Date.now().toString(36)}`,
+      externalTaskId: response.headers.get("x-request-id") || `${String(provider).toUpperCase()}-${Date.now().toString(36)}`,
       estimatedDurationMs: input.taskType === "t2i" ? 12000 : 18000,
       providerMode: outputBytesList.length ? "sync" : "async",
       outputBytes: outputBytesList[0],
@@ -136,21 +174,21 @@ export async function pollImageGenerationResult(input: AsyncPollInput): Promise<
     };
   }
 
-  const apiKey = process.env[config.apiKeySecretRef || "OPENAI_API_KEY"];
+  const apiKey = process.env[config.apiKeySecretRef || "FLUXART_IMAGE_API_KEY"];
   if (!apiKey) {
-    throw new Error(`Missing ${config.apiKeySecretRef || "OPENAI_API_KEY"} for live ${provider} image generation`);
+    throw new Error(`Missing ${config.apiKeySecretRef || "FLUXART_IMAGE_API_KEY"} for live ${provider} image generation`);
   }
 
   const template = process.env.IMAGE_MODEL_ASYNC_RESULT_URL_TEMPLATE;
   const resultUrl = template
     ? template.replace("{externalTaskId}", encodeURIComponent(input.externalTaskId))
     : `${config.baseUrl}/images/generations/${encodeURIComponent(input.externalTaskId)}`;
-  const response = await fetch(resultUrl, {
+  const response = await fetchWithTimeout(resultUrl, {
     method: "GET",
     headers: {
       Authorization: `Bearer ${apiKey}`
     }
-  });
+  }, `${provider} async image result`);
 
   if (!response.ok) {
     throw new Error(`${provider} async image result failed: ${response.status} ${await response.text()}`);

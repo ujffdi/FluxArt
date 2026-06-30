@@ -59,16 +59,18 @@ function requireWhenProduction(value, name, mode) {
 function run() {
   const executionMode = process.env.IMAGE_MODEL_EXECUTION;
   const dataMode = process.env.FLUXART_DATA_MODE || process.env.APP_DATA_MODE;
-  const provider = process.env.IMAGE_MODEL_PROVIDER || "openai";
-  const model = process.env.OPENAI_IMAGE_MODEL || process.env.IMAGE_MODEL_NAME || "gpt-image-2";
-  const baseUrl = process.env.IMAGE_MODEL_BASE_URL || "https://api.openai.com/v1";
-  const apiKeySecretRef = process.env.IMAGE_MODEL_API_KEY_SECRET_REF || "OPENAI_API_KEY";
+  const provider = process.env.IMAGE_MODEL_PROVIDER || "agnes";
+  const model = process.env.IMAGE_MODEL_NAME || process.env.OPENAI_IMAGE_MODEL || "agnes-image-2.1-flash";
+  const baseUrl = process.env.IMAGE_MODEL_BASE_URL || "https://apihub.agnes-ai.com/v1";
+  const apiKeySecretRef = process.env.IMAGE_MODEL_API_KEY_SECRET_REF || "FLUXART_IMAGE_API_KEY";
   const minioEndpoint = process.env.MINIO_ENDPOINT;
   const minioPublicBaseUrl = process.env.MINIO_PUBLIC_BASE_URL;
-  const epayApiUrl = process.env.EPAY_API_URL;
+  const mapayApiUrl = process.env.MAPAY_API_URL || process.env.EPAY_API_URL;
+  const mapayMerchantId = process.env.MAPAY_MERCHANT_ID || process.env.EPAY_MERCHANT_ID;
+  const mapaySigningSecret = process.env.MAPAY_SIGNING_SECRET || process.env.EPAY_SIGNING_SECRET;
+  const mapayNotifyUrl = process.env.MAPAY_NOTIFY_URL || process.env.EPAY_NOTIFY_URL;
+  const mapayReturnUrl = process.env.MAPAY_RETURN_URL || process.env.EPAY_RETURN_URL;
   const sessionSecret = process.env.FLUXART_SESSION_SECRET;
-  const epayNotifyUrl = process.env.EPAY_NOTIFY_URL;
-  const epayReturnUrl = process.env.EPAY_RETURN_URL;
 
   if (!validExecutionModes.has(executionMode)) {
     fail("IMAGE_MODEL_EXECUTION must be either mock or live");
@@ -93,43 +95,43 @@ function run() {
   requireWhenProduction(process.env.MINIO_SECRET_KEY, "MINIO_SECRET_KEY", dataMode);
   requireWhenProduction(minioPublicBaseUrl, "MINIO_PUBLIC_BASE_URL", dataMode);
   requireWhenProduction(sessionSecret, "FLUXART_SESSION_SECRET", dataMode);
-  requireWhenProduction(epayApiUrl, "EPAY_API_URL", dataMode);
-  requireWhenProduction(process.env.EPAY_MERCHANT_ID, "EPAY_MERCHANT_ID", dataMode);
-  requireWhenProduction(process.env.EPAY_SIGNING_SECRET, "EPAY_SIGNING_SECRET", dataMode);
-  requireWhenProduction(epayNotifyUrl, "EPAY_NOTIFY_URL", dataMode);
-  requireWhenProduction(epayReturnUrl, "EPAY_RETURN_URL", dataMode);
+  requireWhenProduction(mapayApiUrl, "MAPAY_API_URL", dataMode);
+  requireWhenProduction(mapayMerchantId, "MAPAY_MERCHANT_ID", dataMode);
+  requireWhenProduction(mapaySigningSecret, "MAPAY_SIGNING_SECRET", dataMode);
+  requireWhenProduction(mapayNotifyUrl, "MAPAY_NOTIFY_URL", dataMode);
+  requireWhenProduction(mapayReturnUrl, "MAPAY_RETURN_URL", dataMode);
 
   validateUrl(baseUrl, "IMAGE_MODEL_BASE_URL");
   validateUrl(minioEndpoint, "MINIO_ENDPOINT");
   validateUrl(minioPublicBaseUrl, "MINIO_PUBLIC_BASE_URL");
-  validateUrl(epayApiUrl, "EPAY_API_URL");
-  validateUrl(epayNotifyUrl, "EPAY_NOTIFY_URL");
-  validateUrl(epayReturnUrl, "EPAY_RETURN_URL");
+  validateUrl(mapayApiUrl, "MAPAY_API_URL");
+  validateUrl(mapayNotifyUrl, "MAPAY_NOTIFY_URL");
+  validateUrl(mapayReturnUrl, "MAPAY_RETURN_URL");
   validateSecret(sessionSecret, "FLUXART_SESSION_SECRET", { minLength: 32 });
   validateSecret(process.env.MINIO_SECRET_KEY, "MINIO_SECRET_KEY", { minLength: 16 });
-  validateSecret(process.env.EPAY_SIGNING_SECRET, "EPAY_SIGNING_SECRET", { minLength: 16 });
+  validateSecret(mapaySigningSecret, "MAPAY_SIGNING_SECRET", { minLength: 16 });
 
   if (executionMode === "live" && !process.env[apiKeySecretRef]) {
     fail(`IMAGE_MODEL_EXECUTION=live requires ${apiKeySecretRef}`);
   }
   if (executionMode === "live") validateSecret(process.env[apiKeySecretRef], apiKeySecretRef, { minLength: 8 });
 
-  if (provider !== "openai" && executionMode === "live") {
-    if (!process.env.IMAGE_MODEL_NAME || model === "gpt-image-2") {
+  if (provider === "custom" && executionMode === "live") {
+    if (!process.env.IMAGE_MODEL_NAME || model === "agnes-image-2.1-flash") {
       fail("live custom providers require IMAGE_MODEL_NAME");
     }
-    if (!process.env.IMAGE_MODEL_BASE_URL || baseUrl === "https://api.openai.com/v1") {
+    if (!process.env.IMAGE_MODEL_BASE_URL || baseUrl === "https://apihub.agnes-ai.com/v1") {
       fail("live custom providers require a custom IMAGE_MODEL_BASE_URL");
     }
-    if (!process.env.IMAGE_MODEL_API_KEY_SECRET_REF || apiKeySecretRef === "OPENAI_API_KEY") {
+    if (!process.env.IMAGE_MODEL_API_KEY_SECRET_REF || apiKeySecretRef === "FLUXART_IMAGE_API_KEY") {
       fail("live custom providers require IMAGE_MODEL_API_KEY_SECRET_REF that references the custom provider secret");
     }
-  } else if (provider !== "openai" && baseUrl === "https://api.openai.com/v1") {
-    warn("custom provider is using the default OpenAI base URL; set IMAGE_MODEL_BASE_URL for a custom endpoint before live execution");
+  } else if (provider === "custom" && baseUrl === "https://apihub.agnes-ai.com/v1") {
+    warn("custom provider is using the default Agnes base URL; set IMAGE_MODEL_BASE_URL for a custom endpoint before live execution");
   }
 
   if (!minioEndpoint) warn("MINIO_ENDPOINT is not set; asset storage remains in local mock mode");
-  if (!epayApiUrl) warn("EPAY_API_URL is not set; payment adapter remains in local mock mode");
+  if (!mapayApiUrl) warn("MAPAY_API_URL is not set; payment adapter remains in local mock mode");
   if (!sessionSecret) warn("FLUXART_SESSION_SECRET is not set; local session hashes use a development-only fallback");
 
   ok(`data=${dataMode || "mock"} execution=${executionMode || "mock"} provider=${provider} model=${model} baseUrl=${baseUrl} keyRef=${apiKeySecretRef}`);
