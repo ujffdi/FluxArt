@@ -4,9 +4,10 @@ import { CreditBalanceError } from "@/server/credits/credit-service";
 import { TaskCapabilityError, TaskConcurrencyError } from "@/server/image/business/task-policy";
 import { parseTaskListQuery } from "@/server/image/business/list-query";
 import { fail, ok } from "@/server/shared/api-response";
-import type { CreateImageTaskInput, GenerationMode } from "@/types/image";
+import type { CreateImageTaskInput, GenerationMode, StructureMode } from "@/types/image";
 
 const taskTypes = new Set<GenerationMode>(["t2i", "i2i", "inpaint", "outpaint"]);
+const structureModes = new Set<StructureMode>(["balanced", "outline", "pose"]);
 const sizePattern = /^\d{3,4}x\d{3,4}$/;
 
 export async function GET(request: Request) {
@@ -48,6 +49,14 @@ export async function POST(request: Request) {
     return fail("size must use WIDTHxHEIGHT format", 400, "SIZE_INVALID");
   }
 
+  if (body.strength !== undefined && (!Number.isFinite(body.strength) || body.strength < 0 || body.strength > 100)) {
+    return fail("strength must be a number between 0 and 100", 400, "STRENGTH_OUT_OF_RANGE");
+  }
+
+  if (body.structureMode !== undefined && !structureModes.has(body.structureMode)) {
+    return fail("unsupported structureMode", 400, "STRUCTURE_MODE_UNSUPPORTED");
+  }
+
   if (body.taskType !== "t2i") {
     if (!body.sourceAssetId) {
       return fail("sourceAssetId is required for source-based image tasks", 400, "SOURCE_ASSET_REQUIRED");
@@ -68,7 +77,8 @@ export async function POST(request: Request) {
       size: body.size || "1024x1024",
       count: body.count || 4,
       stylePreset: body.stylePreset || "商业摄影",
-      strength: body.strength
+      strength: body.strength,
+      structureMode: body.structureMode
     }, session.account.userId);
 
     return renewSessionCookie(ok({ task }), session.sessionToken, session.session);

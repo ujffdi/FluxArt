@@ -2,6 +2,10 @@ export type GenerationMode = "t2i" | "i2i" | "inpaint" | "outpaint";
 
 export const generationModes = ["t2i", "i2i", "inpaint", "outpaint"] as const;
 
+export type StructureMode = "balanced" | "outline" | "pose";
+
+export const structureModes = ["balanced", "outline", "pose"] as const;
+
 export type TaskStatus =
   | "queued"
   | "running"
@@ -159,6 +163,7 @@ export interface CreateImageTaskInput {
   count?: number;
   stylePreset?: string;
   strength?: number;
+  structureMode?: StructureMode;
   modelProvider?: ImageProvider | string;
   modelName?: string;
 }

@@ -91,7 +91,9 @@ async function run() {
     const page = await browser.newPage();
     const customPrompt = `电商主图测试：蓝色玻璃香水瓶放在白色大理石台面上 ${Date.now()}`;
     const customNegativePrompt = "不要暗色背景，不要香薰，不要木质台面";
-    let capturedCreateTaskBody;
+    const customImagePrompt = "保持香水瓶主体结构，替换为浅色电商详情页摄影光线";
+    const sourceAssetId = "IMG-1832";
+    const capturedCreateTaskBodies = [];
 
     await page.route("**/api/auth/me", route => fulfillJson(route, apiOk({
       account: {
@@ -115,9 +117,29 @@ async function run() {
     })));
 
     await page.route("**/api/image/assets*", route => fulfillJson(route, apiOk({
-      assets: [],
+      assets: [{
+        id: sourceAssetId,
+        userId: "usr-prompt-flow",
+        title: "香薰产品主图",
+        taskId: "T2I-PROMPT-FLOW-SOURCE",
+        taskType: "t2i",
+        status: "succeeded",
+        prompt: "暗色背景商业摄影，现代香薰产品，柔和边缘光",
+        imageUrl: "/flux-art-reference.png",
+        objectKey: "assets/demo/prompt-flow-source.png",
+        publicUrl: "/flux-art-reference.png",
+        mimeType: "image/png",
+        sizeBytes: 228390,
+        width: 1024,
+        height: 1024,
+        reviewStatus: "approved",
+        downloadState: "hd",
+        modelProvider: "openai",
+        modelName: "gpt-image-2",
+        createdAt: new Date().toISOString()
+      }],
       versionNodes: [],
-      pagination: { page: 1, pageSize: 100, total: 0, totalPages: 1 }
+      pagination: { page: 1, pageSize: 100, total: 1, totalPages: 1 }
     })));
 
     await page.route("**/api/account/credits", route => fulfillJson(route, apiOk({
@@ -134,18 +156,20 @@ async function run() {
     await page.route("**/api/image/tasks*", async route => {
       const request = route.request();
       if (request.method() === "POST") {
-        capturedCreateTaskBody = request.postDataJSON();
+        const capturedCreateTaskBody = request.postDataJSON();
+        capturedCreateTaskBodies.push(capturedCreateTaskBody);
+        const taskId = `TSK-PROMPT-FLOW-${capturedCreateTaskBodies.length}`;
         await fulfillJson(route, apiOk({
           task: {
-            id: "TSK-PROMPT-FLOW",
+            id: taskId,
             userId: "usr-prompt-flow",
-            taskType: "t2i",
+            taskType: capturedCreateTaskBody.taskType,
             status: "queued",
             prompt: capturedCreateTaskBody.prompt,
             requestPayload: capturedCreateTaskBody,
             modelProvider: "agnes",
             modelName: "agnes-image-2.1-flash",
-            chargedCredits: 18,
+            chargedCredits: capturedCreateTaskBody.taskType === "i2i" ? 32 : 18,
             resultAssetIds: [],
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
@@ -187,10 +211,11 @@ async function run() {
     await page.getByRole("button", { name: "生成图片" }).click();
 
     const deadline = Date.now() + 5000;
-    while (!capturedCreateTaskBody && Date.now() < deadline) {
+    while (capturedCreateTaskBodies.length < 1 && Date.now() < deadline) {
       await delay(100);
     }
 
+    const capturedCreateTaskBody = capturedCreateTaskBodies[0];
     if (!capturedCreateTaskBody) fail("did not capture POST /api/image/tasks");
     if (capturedCreateTaskBody.prompt !== customPrompt) {
       fail(`expected create task prompt ${JSON.stringify(customPrompt)}, received ${JSON.stringify(capturedCreateTaskBody.prompt)}`);
@@ -206,6 +231,50 @@ async function run() {
     }
     if (capturedCreateTaskBody.count !== 2) {
       fail(`expected create task count 2, received ${JSON.stringify(capturedCreateTaskBody.count)}`);
+    }
+    if (capturedCreateTaskBody.sourceAssetId !== undefined) {
+      fail(`expected text-to-image sourceAssetId undefined, received ${JSON.stringify(capturedCreateTaskBody.sourceAssetId)}`);
+    }
+
+    await page.getByRole("tab", { name: "图生图" }).click();
+    try {
+      await page.getByText(`已选择源图 ${sourceAssetId}`).waitFor({ timeout: 10000 });
+    } catch {
+      const uploadCardText = await page.locator(".upload-card").textContent({ timeout: 1000 }).catch(() => "<upload-card missing>");
+      fail(`expected selected source asset ${sourceAssetId} to be visible, upload card text was: ${JSON.stringify(uploadCardText)}`);
+    }
+    await page.getByRole("textbox", { name: "修改方向说明" }).fill(customImagePrompt);
+    await page.getByLabel("参考强度").fill("82");
+    await page.getByLabel("结构保持模式").selectOption("outline");
+    await page.getByRole("button", { name: "生成图片" }).click();
+
+    const imageDeadline = Date.now() + 5000;
+    while (capturedCreateTaskBodies.length < 2 && Date.now() < imageDeadline) {
+      await delay(100);
+    }
+
+    const capturedImageTaskBody = capturedCreateTaskBodies[1];
+    if (!capturedImageTaskBody) fail("did not capture image-to-image POST /api/image/tasks");
+    if (capturedImageTaskBody.taskType !== "i2i") {
+      fail(`expected image taskType "i2i", received ${JSON.stringify(capturedImageTaskBody.taskType)}`);
+    }
+    if (capturedImageTaskBody.prompt !== customImagePrompt) {
+      fail(`expected image prompt ${JSON.stringify(customImagePrompt)}, received ${JSON.stringify(capturedImageTaskBody.prompt)}`);
+    }
+    if (capturedImageTaskBody.sourceAssetId !== sourceAssetId) {
+      fail(`expected image sourceAssetId ${JSON.stringify(sourceAssetId)}, received ${JSON.stringify(capturedImageTaskBody.sourceAssetId)}`);
+    }
+    if (capturedImageTaskBody.strength !== 82) {
+      fail(`expected image strength 82, received ${JSON.stringify(capturedImageTaskBody.strength)}`);
+    }
+    if (capturedImageTaskBody.structureMode !== "outline") {
+      fail(`expected image structureMode "outline", received ${JSON.stringify(capturedImageTaskBody.structureMode)}`);
+    }
+    if (capturedImageTaskBody.stylePreset !== "电商海报") {
+      fail(`expected image stylePreset to persist as "电商海报", received ${JSON.stringify(capturedImageTaskBody.stylePreset)}`);
+    }
+    if (capturedImageTaskBody.negativePrompt !== undefined) {
+      fail(`expected image negativePrompt undefined, received ${JSON.stringify(capturedImageTaskBody.negativePrompt)}`);
     }
 
     log("all checks passed");

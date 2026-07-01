@@ -8,7 +8,8 @@ import type {
   ImageGenerationTask,
   ListImageAssetsQuery,
   ListImageTasksQuery,
-  PaginationMeta
+  PaginationMeta,
+  StructureMode
 } from "@/types/image";
 import { pollImageGenerationResult, submitImageGeneration } from "@/server/image/ai/image-model-adapter";
 import { getImageModelConfig } from "@/server/image/ai/model-config";
@@ -20,6 +21,8 @@ import { assertRunningTaskLimit, assertTaskCapability, assertTaskStateTransition
 
 const freeAssetRetentionDays = 7;
 const freeAssetRetentionLimit = 20;
+const outputReviewAspectRatioTolerance = 0.03;
+const outputReviewDimensionTolerance = 0.08;
 
 function paginate<T>(items: T[], query: { page?: number; pageSize?: number }) {
   const page = query.page || 1;
@@ -33,6 +36,18 @@ function paginate<T>(items: T[], query: { page?: number; pageSize?: number }) {
     items: items.slice(start, start + pageSize),
     pagination
   };
+}
+
+function relativeDifference(left: number, right: number) {
+  return Math.abs(left - right) / Math.max(left, right);
+}
+
+function dimensionsAreCloseEnough(output: StoredGeneratedOutput, expectedWidth: number, expectedHeight: number) {
+  const expectedAspectRatio = expectedWidth / expectedHeight;
+  const outputAspectRatio = output.width / output.height;
+  return relativeDifference(outputAspectRatio, expectedAspectRatio) <= outputReviewAspectRatioTolerance
+    && relativeDifference(output.width, expectedWidth) <= outputReviewDimensionTolerance
+    && relativeDifference(output.height, expectedHeight) <= outputReviewDimensionTolerance;
 }
 
 function includesText(value: string, q: string) {
@@ -230,7 +245,7 @@ async function reviewStoredOutput(output: StoredGeneratedOutput, expectedSize?: 
   }
   if (expectedSize) {
     const [expectedWidth, expectedHeight] = expectedSize.split("x").map(value => Number(value));
-    if (expectedWidth && expectedHeight && (output.width !== expectedWidth || output.height !== expectedHeight)) {
+    if (expectedWidth && expectedHeight && !dimensionsAreCloseEnough(output, expectedWidth, expectedHeight)) {
       return { approved: false, reason: "output review rejected unexpected dimensions" };
     }
   }
@@ -246,6 +261,21 @@ function outputBytesListFromSubmission(submission: { outputBytes?: Buffer; outpu
     : submission.outputBytes
       ? [submission.outputBytes]
       : [];
+}
+
+function requestPayloadString(payload: Record<string, unknown>, key: string) {
+  const value = payload[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function requestPayloadNumber(payload: Record<string, unknown>, key: string) {
+  const value = payload[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function requestPayloadStructureMode(payload: Record<string, unknown>): StructureMode | undefined {
+  const value = payload.structureMode;
+  return value === "balanced" || value === "outline" || value === "pose" ? value : undefined;
 }
 
 async function scheduleGeneratedOutputCleanup(taskId: string, objectKey: string) {
@@ -364,13 +394,18 @@ export async function runImageTask(taskId: string, userId?: string) {
     if (task.status !== "queued") return task;
 
     await transitionTaskState(task.id, "running", userId);
+    const sourceAsset = task.sourceAssetId ? await getAsset(task.sourceAssetId, userId) : undefined;
     const submission = await submitImageGeneration({
       taskType: task.taskType,
       prompt: task.prompt,
       negativePrompt: task.negativePrompt,
       sourceAssetId: task.sourceAssetId,
-      size: typeof task.requestPayload.size === "string" ? task.requestPayload.size : "1024x1024",
-      count: typeof task.requestPayload.count === "number" ? task.requestPayload.count : 1
+      sourceImageUrl: sourceAsset?.publicUrl || sourceAsset?.imageUrl,
+      size: requestPayloadString(task.requestPayload, "size") || "1024x1024",
+      count: requestPayloadNumber(task.requestPayload, "count") || 1,
+      stylePreset: requestPayloadString(task.requestPayload, "stylePreset"),
+      strength: requestPayloadNumber(task.requestPayload, "strength"),
+      structureMode: requestPayloadStructureMode(task.requestPayload)
     });
     const submissionId = `submission-${task.id}`;
     await repositories.image.createProviderSubmission({

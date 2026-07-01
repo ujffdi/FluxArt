@@ -7,21 +7,21 @@ export const billingPlans: Record<BillingPlanId, BillingPlan> = {
     planId: "credits-500",
     displayName: "500 Credit Pack",
     credits: 500,
-    amountCents: 2900,
+    amountCents: 100,
     kind: "credit_pack"
   },
   "credits-1500": {
     planId: "credits-1500",
     displayName: "1500 Credit Pack",
     credits: 1500,
-    amountCents: 7900,
+    amountCents: 100,
     kind: "credit_pack"
   },
   "credits-5000": {
     planId: "credits-5000",
     displayName: "5000 Credit Pack",
     credits: 5000,
-    amountCents: 19900,
+    amountCents: 100,
     kind: "credit_pack"
   },
   "pro-monthly": {

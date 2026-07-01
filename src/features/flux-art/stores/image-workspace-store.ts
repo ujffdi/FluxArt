@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { GenerationMode } from "@/types/image";
+import type { GenerationMode, StructureMode } from "@/types/image";
 
 export type ProductPage = "workspace" | "assets" | "account" | "billing";
 export type SessionState = "logged-in" | "guest" | "expired";
@@ -18,6 +18,7 @@ interface ImageWorkspaceState {
   customSizeVisible: boolean;
   generationCount: number;
   referenceStrength: number;
+  structureMode: StructureMode;
   setPage: (page: ProductPage) => void;
   setGenerationMode: (mode: "txt" | "img") => void;
   setSelectedAssetId: (assetId: string) => void;
@@ -28,6 +29,7 @@ interface ImageWorkspaceState {
   setCustomSizeVisible: (visible: boolean) => void;
   setGenerationCount: (count: number) => void;
   setReferenceStrength: (value: number) => void;
+  setStructureMode: (mode: StructureMode) => void;
 }
 
 export function toTaskType(mode: "txt" | "img"): GenerationMode {
@@ -46,6 +48,7 @@ export const useImageWorkspaceStore = create<ImageWorkspaceState>()(
       customSizeVisible: false,
       generationCount: 4,
       referenceStrength: 62,
+      structureMode: "balanced",
       setPage: page => set({ page }),
       setGenerationMode: generationMode => set({ generationMode }),
       setSelectedAssetId: selectedAssetId => set({ selectedAssetId }),
@@ -55,7 +58,8 @@ export const useImageWorkspaceStore = create<ImageWorkspaceState>()(
       clearToast: () => set({ toast: "" }),
       setCustomSizeVisible: customSizeVisible => set({ customSizeVisible }),
       setGenerationCount: generationCount => set({ generationCount }),
-      setReferenceStrength: referenceStrength => set({ referenceStrength })
+      setReferenceStrength: referenceStrength => set({ referenceStrength }),
+      setStructureMode: structureMode => set({ structureMode })
     }),
     {
       name: "flux-art-workspace",
@@ -65,7 +69,8 @@ export const useImageWorkspaceStore = create<ImageWorkspaceState>()(
         theme: state.theme,
         customSizeVisible: state.customSizeVisible,
         generationCount: state.generationCount,
-        referenceStrength: state.referenceStrength
+        referenceStrength: state.referenceStrength,
+        structureMode: state.structureMode
       })
     }
   )

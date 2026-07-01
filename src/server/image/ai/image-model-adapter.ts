@@ -2,6 +2,10 @@ import sharp from "sharp";
 import type { CreateImageTaskInput } from "@/types/image";
 import { getImageModelConfig } from "./model-config";
 
+export interface ImageModelGenerationInput extends CreateImageTaskInput {
+  sourceImageUrl?: string;
+}
+
 export interface ModelSubmission {
   provider: string;
   modelName: string;
@@ -27,18 +31,51 @@ function requestTimeoutMs() {
   return Number.isFinite(configured) && configured > 0 ? configured : 120000;
 }
 
-function buildLiveGenerationBody(input: CreateImageTaskInput, modelName: string, provider: string) {
+const structureModeInstruction: Record<string, string> = {
+  balanced: "Balance source structure preservation with the requested style change.",
+  outline: "Preserve the source outline and object boundaries as much as possible.",
+  pose: "Preserve the source pose, camera angle, and composition as much as possible."
+};
+
+function buildPromptWithControls(input: ImageModelGenerationInput) {
+  const controls: string[] = [];
+  if (input.stylePreset) controls.push(`Style preset: ${input.stylePreset}.`);
+  if (input.taskType !== "t2i" && input.structureMode) controls.push(structureModeInstruction[input.structureMode]);
+  if (input.taskType !== "t2i" && typeof input.strength === "number") controls.push(`Reference strength: ${input.strength} percent.`);
+  if (input.negativePrompt) controls.push(`Avoid: ${input.negativePrompt}.`);
+  return controls.length ? `${input.prompt}\n\n${controls.join(" ")}` : input.prompt;
+}
+
+function buildProviderExtraBody(input: ImageModelGenerationInput, provider: string) {
+  const extraBody: Record<string, unknown> = {};
+
+  if (provider === "agnes") {
+    extraBody.response_format = "url";
+    if (input.sourceImageUrl) extraBody.image = [input.sourceImageUrl];
+  }
+
+  if (provider === "agnes" || provider === "custom") {
+    if (input.taskType) extraBody.task_type = input.taskType;
+    if (input.sourceAssetId) extraBody.source_asset_id = input.sourceAssetId;
+    if (input.stylePreset) extraBody.style_preset = input.stylePreset;
+    if (typeof input.strength === "number") extraBody.reference_strength = input.strength;
+    if (input.structureMode) extraBody.structure_mode = input.structureMode;
+  }
+
+  return Object.keys(extraBody).length ? extraBody : undefined;
+}
+
+function buildLiveGenerationBody(input: ImageModelGenerationInput, modelName: string, provider: string) {
   const body: Record<string, unknown> = {
     model: modelName,
-    prompt: input.prompt,
+    prompt: buildPromptWithControls(input),
     size: input.size || "1024x1024"
   };
 
-  if (provider === "agnes") {
-    body.extra_body = {
-      response_format: "url"
-    };
-  } else {
+  const extraBody = buildProviderExtraBody(input, provider);
+  if (extraBody) body.extra_body = extraBody;
+
+  if (provider !== "agnes") {
     body.n = input.count || 1;
   }
 
@@ -65,7 +102,7 @@ async function fetchWithTimeout(url: string, init: RequestInit, label: string) {
   }
 }
 
-async function createMockOutput(input: CreateImageTaskInput, index = 0) {
+async function createMockOutput(input: ImageModelGenerationInput, index = 0) {
   const [width, height] = String(input.size || "1024x1024").split("x").map(value => Number(value));
   const backgrounds = input.taskType === "outpaint"
     ? ["#134e4a", "#0f766e", "#115e59", "#0f766e"]
@@ -105,7 +142,7 @@ async function outputBytesFromPayload(payload: unknown, provider: string) {
   return outputBytesList;
 }
 
-export async function submitImageGeneration(input: CreateImageTaskInput): Promise<ModelSubmission> {
+export async function submitImageGeneration(input: ImageModelGenerationInput): Promise<ModelSubmission> {
   const config = getImageModelConfig();
   const provider = config.provider;
   const modelName = config.model;

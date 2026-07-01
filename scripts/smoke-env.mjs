@@ -43,6 +43,27 @@ expect(missingSessionSecret.status !== 0 && missingSessionSecret.stderr.includes
 const placeholderMapaySecret = runCheck({ ...productionEnv, MAPAY_SIGNING_SECRET: "secret" });
 expect(placeholderMapaySecret.status !== 0 && placeholderMapaySecret.stderr.includes("MAPAY_SIGNING_SECRET"), "placeholder MaPay secret should fail env validation");
 
+const missingTestToolsSecret = runCheck({ ...productionEnv, FLUXART_ENABLE_TEST_TOOLS: "1", FLUXART_TEST_TOOLS_SECRET: "" });
+expect(missingTestToolsSecret.status !== 0 && missingTestToolsSecret.stderr.includes("FLUXART_TEST_TOOLS_SECRET"), "enabled test tools should require a secret");
+
+const productionTestTools = runCheck({
+  ...productionEnv,
+  FLUXART_ENABLE_TEST_TOOLS: "1",
+  FLUXART_TEST_TOOLS_SECRET: "test-tools-secret-valid-123",
+  FLUXART_TEST_TOOLS_ALLOWED_USERNAMES: "tongsr"
+});
+expect(productionTestTools.status !== 0 && productionTestTools.stderr.includes("FLUXART_ENABLE_TEST_TOOLS"), "production env must reject test tools");
+
+const localTestTools = runCheck({
+  NODE_ENV: "development",
+  FLUXART_DATA_MODE: "mock",
+  IMAGE_MODEL_EXECUTION: "mock",
+  FLUXART_ENABLE_TEST_TOOLS: "1",
+  FLUXART_TEST_TOOLS_SECRET: "test-tools-secret-valid-123",
+  FLUXART_TEST_TOOLS_ALLOWED_USERNAMES: "tongsr"
+});
+expect(localTestTools.status === 0, `local test tools env should pass: ${localTestTools.stderr || localTestTools.stdout}`);
+
 const incompleteCustomProvider = runCheck({
   ...productionEnv,
   IMAGE_MODEL_PROVIDER: "custom",

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getRepositories } from "@/server/data/repositories";
+import { localTestToolsEnabled } from "@/server/dev/local-test-tools-runtime";
 import type { CreateImageTaskInput, GenerationMode } from "@/types/image";
 
 const dailyFreeGrantAmount = 10;
@@ -42,6 +43,36 @@ function addDays(date: Date, days: number) {
 
 function endOfUtcDay(date = new Date()) {
   return new Date(`${dayKey(date)}T23:59:59.999Z`);
+}
+
+function normalizeUsername(username: string) {
+  return username.trim().toLowerCase();
+}
+
+function allowedTestUsernames() {
+  const configured = process.env.FLUXART_TEST_TOOLS_ALLOWED_USERNAMES;
+  const usernames = configured ? configured.split(",") : ["tongsr"];
+  return new Set(usernames.map(normalizeUsername).filter(Boolean));
+}
+
+async function topUpTestAccountIfNeeded(userId: string, requiredCredits: number, availableCredits: number) {
+  if (!localTestToolsEnabled() || availableCredits >= requiredCredits) return undefined;
+
+  const repositories = getRepositories();
+  const account = await repositories.account.getCurrentAccount(userId);
+  const username = normalizeUsername(account.username || "");
+  if (!allowedTestUsernames().has(username)) return undefined;
+
+  const amount = requiredCredits - availableCredits;
+  const now = iso(new Date());
+  await repositories.credits.createAdjustment({
+    userId,
+    amount,
+    now,
+    label: "Test Auto Credit Top-up",
+    sourceRefId: `test-auto-top-up-${randomUUID()}`
+  });
+  return repositories.account.getCurrentAccount(userId);
 }
 
 export async function grantDailyFreeCreditsIfNeeded(userId: string) {
@@ -105,10 +136,11 @@ export async function getAvailableCredits(userId: string) {
 export async function assertSufficientCreditsForGeneration(userId: string, input: Pick<CreateImageTaskInput, "taskType" | "count">) {
   const account = await getAvailableCredits(userId);
   const requiredCredits = getGenerationCreditCost(input);
-  if (account.credits < requiredCredits) {
+  const fundedAccount = await topUpTestAccountIfNeeded(userId, requiredCredits, account.credits);
+  if (!fundedAccount && account.credits < requiredCredits) {
     throw new CreditBalanceError(`insufficient credits: ${requiredCredits} required, ${account.credits} available`);
   }
-  return { account, requiredCredits };
+  return { account: fundedAccount || account, requiredCredits };
 }
 
 export async function reserveCreditsForGeneration(userId: string, input: Pick<CreateImageTaskInput, "taskType" | "count"> & { taskId: string }) {
@@ -129,7 +161,8 @@ export async function reserveCreditsForGeneration(userId: string, input: Pick<Cr
 
 export async function spendCreditsForDownload(userId: string, input: { downloadId: string; amount: number }) {
   const account = await getAvailableCredits(userId);
-  if (account.credits < input.amount) {
+  const fundedAccount = await topUpTestAccountIfNeeded(userId, input.amount, account.credits);
+  if (!fundedAccount && account.credits < input.amount) {
     throw new CreditBalanceError(`insufficient credits: ${input.amount} required, ${account.credits} available`);
   }
 
@@ -145,7 +178,7 @@ export async function spendCreditsForDownload(userId: string, input: { downloadI
   });
   const spend = await finalizeCreditHoldSpend(reservation.hold.id, "Download Credit Spend");
 
-  return { account, hold: reservation.hold, holdLedgerEntries: reservation.ledgerEntries, spendLedgerEntries: spend?.ledgerEntries || [] };
+  return { account: fundedAccount || account, hold: reservation.hold, holdLedgerEntries: reservation.ledgerEntries, spendLedgerEntries: spend?.ledgerEntries || [] };
 }
 
 export async function releaseCreditHold(holdId: string, label = "Credit Hold Released") {

@@ -448,13 +448,30 @@ async function run() {
         headers: { "content-type": "application/json", "x-request-id": "agnes-request-1" }
       });
     };
-    const agnesSubmission = await submitImageGeneration({ taskType: "t2i", prompt: "agnes provider contract", count: 4, size: "16x16" });
+    const agnesSubmission = await submitImageGeneration({
+      taskType: "i2i",
+      prompt: "agnes provider contract",
+      count: 4,
+      size: "16x16",
+      sourceAssetId: "asset-source",
+      sourceImageUrl: "https://cdn.example.test/source.png",
+      stylePreset: "极简产品",
+      strength: 78,
+      structureMode: "outline"
+    });
     expect(agnesSubmission.provider === "agnes" && agnesSubmission.modelName === "agnes-image-2.1-flash", "Agnes provider env should configure the image model seam");
     expect(agnesRequestBody?.model === "agnes-image-2.1-flash", "Agnes requests should use the documented model name");
-    expect(agnesRequestBody?.prompt === "agnes provider contract", "Agnes requests should forward the task prompt to the image model");
+    expect(typeof agnesRequestBody?.prompt === "string" && agnesRequestBody.prompt.includes("agnes provider contract"), "Agnes requests should forward the task prompt to the image model");
+    expect(typeof agnesRequestBody?.prompt === "string" && agnesRequestBody.prompt.includes("Style preset: 极简产品."), "Agnes requests should include the selected style preset in the model prompt");
+    expect(typeof agnesRequestBody?.prompt === "string" && agnesRequestBody.prompt.includes("Reference strength: 78 percent."), "Agnes requests should include reference strength in the model prompt");
     expect(agnesRequestBody?.size === "16x16", "Agnes requests should forward the task size to the image model");
     expect(!("n" in (agnesRequestBody || {})), "Agnes requests should not send undocumented n parameter");
-    expect((agnesRequestBody?.extra_body as Record<string, unknown> | undefined)?.response_format === "url", "Agnes requests should put response_format under extra_body");
+    const agnesExtraBody = agnesRequestBody?.extra_body as Record<string, unknown> | undefined;
+    expect(agnesExtraBody?.response_format === "url", "Agnes requests should put response_format under extra_body");
+    expect(Array.isArray(agnesExtraBody?.image) && agnesExtraBody.image[0] === "https://cdn.example.test/source.png", "Agnes image-to-image requests should send the selected source image URL under extra_body.image");
+    expect(agnesExtraBody?.style_preset === "极简产品", "Agnes requests should pass stylePreset as provider metadata");
+    expect(agnesExtraBody?.reference_strength === 78, "Agnes requests should pass reference strength as provider metadata");
+    expect(agnesExtraBody?.structure_mode === "outline", "Agnes requests should pass structure mode as provider metadata");
   } finally {
     globalThis.fetch = originalFetch;
     if (previousExecutionForProvider) process.env.IMAGE_MODEL_EXECUTION = previousExecutionForProvider;
@@ -668,9 +685,10 @@ async function run() {
   const retentionStore = createMockDataStore();
   retentionStore.users[0].memberStatus = "free";
   const retentionUserId = retentionStore.users[0].id;
+  const retentionNow = new Date();
   retentionStore.assets = [
-    ...Array.from({ length: 25 }, (_, index) => makeRetentionAsset(retentionUserId, index, new Date(now.getTime() - index * 60000).toISOString())),
-    makeRetentionAsset(retentionUserId, 99, new Date(now.getTime() - 8 * 86400000).toISOString())
+    ...Array.from({ length: 25 }, (_, index) => makeRetentionAsset(retentionUserId, index, new Date(retentionNow.getTime() - index * 60000).toISOString())),
+    makeRetentionAsset(retentionUserId, 99, new Date(retentionNow.getTime() - 8 * 86400000).toISOString())
   ];
   setRepositoriesForTesting(createMockRepositories(retentionStore));
   const retainedAssets = await listAssets({}, retentionUserId);
@@ -734,6 +752,43 @@ async function run() {
   expect(runnerStore.creditHolds[0]?.status === "spent", "approved provider output should convert the credit hold to spend");
   expect(runnerStore.ledgerEntries.some(entry => entry.entryType === "spend"), "approved provider output should write spend ledger entries");
   setRepositoriesForTesting(undefined);
+
+  const approximateDimensionStore = createMockDataStore();
+  approximateDimensionStore.users[0].memberStatus = "credit_pack";
+  approximateDimensionStore.creditBuckets[0].remainingAmount = 100;
+  approximateDimensionStore.creditBuckets[0].originalAmount = 100;
+  approximateDimensionStore.tasks = [];
+  approximateDimensionStore.assets = [];
+  approximateDimensionStore.creditHolds = [];
+  approximateDimensionStore.ledgerEntries = [];
+  approximateDimensionStore.providerSubmissions = [];
+  approximateDimensionStore.providerResults = [];
+  setRepositoriesForTesting(createMockRepositories(approximateDimensionStore));
+  const previousExecutionForApproximateDimensions = process.env.IMAGE_MODEL_EXECUTION;
+  const previousFluxArtImageApiKeyForApproximateDimensions = process.env.FLUXART_IMAGE_API_KEY;
+  try {
+    const approximateOutput = await sharp({ create: { width: 736, height: 1312, channels: 3, background: "#155e75" } }).png().toBuffer();
+    process.env.IMAGE_MODEL_EXECUTION = "live";
+    process.env.FLUXART_IMAGE_API_KEY = "fake-key";
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      data: [{ b64_json: approximateOutput.toString("base64") }]
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json", "x-request-id": "approximate-dimensions-provider-request-1" }
+    });
+    const approximateDimensionTask = await createTask({ taskType: "i2i", prompt: "runner accepts provider approximate dimensions", count: 1, size: "768x1344", sourceAssetId: "IMG-1832" }, approximateDimensionStore.users[0].id);
+    const completedApproximateDimensionTask = await runImageTask(approximateDimensionTask.id, approximateDimensionStore.users[0].id);
+    expect(completedApproximateDimensionTask?.status === "succeeded", "provider output with close matching aspect ratio and dimensions should pass output review");
+    expect(approximateDimensionStore.assets[0]?.width === 736 && approximateDimensionStore.assets[0]?.height === 1312, "approved approximate provider output should preserve returned dimensions");
+    expect(approximateDimensionStore.creditHolds[0]?.status === "spent", "approved approximate provider output should spend the credit hold");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousExecutionForApproximateDimensions) process.env.IMAGE_MODEL_EXECUTION = previousExecutionForApproximateDimensions;
+    else delete process.env.IMAGE_MODEL_EXECUTION;
+    if (previousFluxArtImageApiKeyForApproximateDimensions) process.env.FLUXART_IMAGE_API_KEY = previousFluxArtImageApiKeyForApproximateDimensions;
+    else delete process.env.FLUXART_IMAGE_API_KEY;
+    setRepositoriesForTesting(undefined);
+  }
 
   const rejectedRunnerStore = createMockDataStore();
   rejectedRunnerStore.users[0].memberStatus = "credit_pack";

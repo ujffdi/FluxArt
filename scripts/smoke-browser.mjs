@@ -15,6 +15,8 @@ const routes = [
   "/workspace/account",
   "/workspace/billing"
 ];
+const hintContrastSelectors = [".toast.show", ".notice", ".chip", ".status", ".badge", ".small", ".api-state"];
+const minimumTextContrast = 4.5;
 
 let serverProcess;
 
@@ -24,6 +26,103 @@ function log(message) {
 
 function fail(message) {
   throw new Error(message);
+}
+
+function parseRgbColor(value) {
+  const match = value.match(/rgba?\(([^)]+)\)/);
+  if (!match) return undefined;
+
+  const [r, g, b, alpha] = match[1].split(",").map(part => part.trim());
+  return {
+    r: Number(r),
+    g: Number(g),
+    b: Number(b),
+    a: alpha === undefined ? 1 : Number(alpha)
+  };
+}
+
+function blendColor(foreground, background) {
+  const alpha = foreground.a + background.a * (1 - foreground.a);
+  if (alpha === 0) return { r: 255, g: 255, b: 255, a: 1 };
+
+  return {
+    r: (foreground.r * foreground.a + background.r * background.a * (1 - foreground.a)) / alpha,
+    g: (foreground.g * foreground.a + background.g * background.a * (1 - foreground.a)) / alpha,
+    b: (foreground.b * foreground.a + background.b * background.a * (1 - foreground.a)) / alpha,
+    a: alpha
+  };
+}
+
+function relativeLuminance(color) {
+  const [r, g, b] = [color.r, color.g, color.b].map(channel => {
+    const value = channel / 255;
+    return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function contrastRatio(first, second) {
+  const firstLuminance = relativeLuminance(first);
+  const secondLuminance = relativeLuminance(second);
+  return (Math.max(firstLuminance, secondLuminance) + 0.05) / (Math.min(firstLuminance, secondLuminance) + 0.05);
+}
+
+async function assertLightThemeHintContrast(page) {
+  const failures = [];
+
+  for (const route of routes) {
+    await page.goto(`${baseUrl}${route}`, { waitUntil: "networkidle" });
+    await page.evaluate(() => {
+      document.documentElement.dataset.theme = "light";
+      const toast = document.querySelector(".toast");
+      if (toast) {
+        toast.textContent = "任务提交失败：积分不足，请购买额度或等待免费额度刷新。";
+        toast.classList.add("show");
+      }
+    });
+
+    const samples = await page.evaluate(selectors => {
+      function isVisible(element) {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+      }
+
+      return selectors.flatMap(selector => Array.from(document.querySelectorAll(selector))
+        .filter(isVisible)
+        .slice(0, 10)
+        .map(element => {
+          const style = window.getComputedStyle(element);
+          let backgroundColor = style.backgroundColor;
+          let parent = element.parentElement;
+          while ((backgroundColor === "rgba(0, 0, 0, 0)" || backgroundColor === "transparent") && parent) {
+            backgroundColor = window.getComputedStyle(parent).backgroundColor;
+            parent = parent.parentElement;
+          }
+
+          return {
+            selector,
+            text: (element.textContent || "").trim().replace(/\s+/g, " ").slice(0, 80),
+            color: style.color,
+            backgroundColor
+          };
+        }));
+    }, hintContrastSelectors);
+
+    for (const sample of samples) {
+      const foreground = parseRgbColor(sample.color);
+      const background = parseRgbColor(sample.backgroundColor);
+      if (!foreground || !background) continue;
+
+      const blendedBackground = blendColor(background, { r: 255, g: 255, b: 255, a: 1 });
+      const ratio = contrastRatio(foreground, blendedBackground);
+      if (ratio < minimumTextContrast) {
+        failures.push(`${route} ${sample.selector} "${sample.text}" contrast ${ratio.toFixed(2)} (${sample.color} on ${sample.backgroundColor})`);
+      }
+    }
+  }
+
+  if (failures.length) fail(`light theme hint contrast below ${minimumTextContrast}: ${failures.join("; ")}`);
 }
 
 function startServerIfNeeded() {
@@ -84,6 +183,8 @@ async function run() {
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage();
+    await assertLightThemeHintContrast(page);
+
     await page.goto(`${baseUrl}/workspace/account`);
     await page.getByText("游客模式").waitFor({ timeout: 10000 });
     await page.getByText("积分 0").waitFor({ timeout: 10000 });

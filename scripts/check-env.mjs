@@ -71,6 +71,9 @@ function run() {
   const mapayNotifyUrl = process.env.MAPAY_NOTIFY_URL || process.env.EPAY_NOTIFY_URL;
   const mapayReturnUrl = process.env.MAPAY_RETURN_URL || process.env.EPAY_RETURN_URL;
   const sessionSecret = process.env.FLUXART_SESSION_SECRET;
+  const testToolsEnabled = process.env.FLUXART_ENABLE_TEST_TOOLS === "1";
+  const testToolsSecret = process.env.FLUXART_TEST_TOOLS_SECRET;
+  const testToolsMaxCreditDelta = process.env.FLUXART_TEST_TOOLS_MAX_CREDIT_DELTA;
 
   if (!validExecutionModes.has(executionMode)) {
     fail("IMAGE_MODEL_EXECUTION must be either mock or live");
@@ -110,6 +113,20 @@ function run() {
   validateSecret(sessionSecret, "FLUXART_SESSION_SECRET", { minLength: 32 });
   validateSecret(process.env.MINIO_SECRET_KEY, "MINIO_SECRET_KEY", { minLength: 16 });
   validateSecret(mapaySigningSecret, "MAPAY_SIGNING_SECRET", { minLength: 16 });
+  validateSecret(testToolsSecret, "FLUXART_TEST_TOOLS_SECRET", { minLength: 24 });
+
+  if (testToolsEnabled && !testToolsSecret) {
+    fail("FLUXART_TEST_TOOLS_SECRET is required when FLUXART_ENABLE_TEST_TOOLS=1");
+  }
+  if (testToolsEnabled && process.env.NODE_ENV === "production") {
+    fail("FLUXART_ENABLE_TEST_TOOLS=1 is only allowed for local development, never NODE_ENV=production");
+  }
+  if (testToolsEnabled && !process.env.FLUXART_TEST_TOOLS_ALLOWED_USERNAMES) {
+    warn("FLUXART_TEST_TOOLS_ALLOWED_USERNAMES is not set; test tools default to tongsr only");
+  }
+  if (testToolsMaxCreditDelta && (!Number.isInteger(Number(testToolsMaxCreditDelta)) || Number(testToolsMaxCreditDelta) <= 0)) {
+    fail("FLUXART_TEST_TOOLS_MAX_CREDIT_DELTA must be a positive integer");
+  }
 
   if (executionMode === "live" && !process.env[apiKeySecretRef]) {
     fail(`IMAGE_MODEL_EXECUTION=live requires ${apiKeySecretRef}`);

@@ -175,6 +175,13 @@ async function runSmoke() {
   expectStatus(anonymousAssets, 401, "anonymous list assets");
   expect(anonymousAssets.body.data.errorCode === "AUTH_REQUIRED", "anonymous workspace API should require a server session");
 
+  const testToolsRejected = await request("/api/dev/credits", {
+    method: "POST",
+    body: JSON.stringify({ username: "tongsr", targetCredits: 0 })
+  });
+  expectStatus(testToolsRejected, 403, "test credit tools in production smoke");
+  expect(testToolsRejected.body.data.errorCode === "TEST_TOOLS_LOCAL_ONLY", "test credit tools should be local-development only");
+
   const demoLogin = await request("/api/auth/login", {
     method: "POST",
     body: JSON.stringify({ username: "demo", password: "demo-password-1" })
@@ -406,7 +413,7 @@ async function runSmoke() {
     out_trade_no: creditPackOrder.body.data.order.outTradeNo,
     trade_no: `provider_${Date.now().toString(36)}`,
     trade_status: "TRADE_SUCCESS",
-    money: "29.00"
+    money: "1.00"
   };
   const invalidSignatureNotify = await request("/api/payments/epay/notify", {
     method: "POST",
