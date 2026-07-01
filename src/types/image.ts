@@ -21,6 +21,10 @@ export type AssetStatus = "succeeded" | "reviewing" | "processing" | "failed";
 
 export const assetStatuses = ["succeeded", "reviewing", "processing", "failed"] as const;
 
+export type AssetOrigin = "generated" | "uploaded";
+
+export const assetOrigins = ["generated", "uploaded"] as const;
+
 export type ImageProvider = "openai" | "agnes" | "custom";
 
 export interface PaginationQuery {
@@ -46,6 +50,7 @@ export interface ListImageTasksQuery extends PaginationQuery {
 export interface ListImageAssetsQuery extends PaginationQuery {
   taskType?: GenerationMode;
   status?: AssetStatus;
+  origin?: AssetOrigin;
   q?: string;
   createdFrom?: string;
   createdTo?: string;
@@ -77,8 +82,9 @@ export interface ImageAsset {
   id: string;
   userId: string;
   title: string;
-  taskId: string;
-  taskType: GenerationMode;
+  origin: AssetOrigin;
+  taskId?: string;
+  taskType?: GenerationMode;
   status: AssetStatus;
   prompt: string;
   imageUrl: string;

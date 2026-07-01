@@ -112,6 +112,12 @@ async function uploadImage(kind, buffer, fileName, type) {
   return request("/api/image/uploads", { method: "POST", body: form });
 }
 
+async function uploadVisibleAsset(buffer, fileName, type) {
+  const form = new FormData();
+  form.set("file", new Blob([buffer], { type }), fileName);
+  return request("/api/image/assets/upload", { method: "POST", body: form });
+}
+
 async function waitForServer() {
   const deadline = Date.now() + 30000;
   let lastError;
@@ -195,6 +201,10 @@ async function runSmoke() {
 
   const postLogoutAssets = await request("/api/image/assets");
   expectStatus(postLogoutAssets, 401, "post-logout list assets");
+
+  const anonymousAssetUpload = await uploadVisibleAsset(await makeImage(12, 12, "png"), "anonymous.png", "image/png");
+  expectStatus(anonymousAssetUpload, 401, "anonymous visible asset upload");
+  expect(anonymousAssetUpload.body.data.errorCode === "AUTH_REQUIRED", "visible asset upload should require authentication");
 
   const secondDemoLogin = await request("/api/auth/login", {
     method: "POST",
@@ -401,6 +411,38 @@ async function runSmoke() {
   expectStatus(repeatedCredits, 200, "repeated account credits");
   expect(repeatedCredits.body.data.credits.credits === 60, "daily free grant should be idempotent for the current day");
 
+  const tasksBeforeAssetUpload = await request("/api/image/tasks");
+  expectStatus(tasksBeforeAssetUpload, 200, "tasks before visible asset upload");
+  const visibleAssetUpload = await uploadVisibleAsset(await makeImage(36, 28, "png"), "reference-upload.png", "image/png");
+  expectStatus(visibleAssetUpload, 200, "visible asset upload");
+  const uploadedAsset = visibleAssetUpload.body.data.asset;
+  expect(uploadedAsset.origin === "uploaded", "visible asset upload should create an uploaded asset");
+  expect(uploadedAsset.title === "reference-upload", "visible asset upload should default the title from the file name");
+  expect(uploadedAsset.reviewStatus === "skipped", "visible asset upload should skip generated-output review");
+  expect(uploadedAsset.status === "succeeded", "visible asset upload should be immediately usable");
+  expect(!uploadedAsset.taskId, "visible asset upload should not create a task id");
+  expect(!uploadedAsset.taskType, "visible asset upload should not pretend to have a generation task type");
+  expect(!uploadedAsset.commercialAuthorizationStatement, "visible asset upload should not expose commercial authorization");
+  expect(uploadedAsset.width === 36 && uploadedAsset.height === 28, "visible asset upload should store decoded dimensions");
+  const uploadedAssetDetail = await request(`/api/image/assets/${uploadedAsset.id}`);
+  expectStatus(uploadedAssetDetail, 200, "uploaded asset detail");
+  expect(uploadedAssetDetail.body.data.detail.asset.origin === "uploaded", "uploaded asset detail should preserve origin");
+  const uploadedAssetFilter = await request("/api/image/assets?origin=uploaded");
+  expectStatus(uploadedAssetFilter, 200, "uploaded asset origin filter");
+  expect(uploadedAssetFilter.body.data.assets.some(asset => asset.id === uploadedAsset.id), "origin=uploaded should include the uploaded asset");
+  const invalidAssetOrigin = await request("/api/image/assets?origin=external");
+  expectStatus(invalidAssetOrigin, 400, "invalid asset origin filter");
+  expect(invalidAssetOrigin.body.data.errorCode === "ASSET_ORIGIN_UNSUPPORTED", "invalid asset origin should return ASSET_ORIGIN_UNSUPPORTED");
+  const oversizedVisibleAsset = await uploadVisibleAsset(Buffer.alloc(10 * 1024 * 1024 + 1), "too-large.png", "image/png");
+  expectStatus(oversizedVisibleAsset, 400, "oversized visible asset upload");
+  expect(oversizedVisibleAsset.body.data.errorCode === "UPLOAD_TOO_LARGE", "visible asset upload should reject files above 10MB");
+  const creditsAfterAssetUpload = await request("/api/account/credits");
+  expectStatus(creditsAfterAssetUpload, 200, "credits after visible asset upload");
+  expect(creditsAfterAssetUpload.body.data.credits.credits === 60, "visible asset upload should not spend or hold credits");
+  const tasksAfterAssetUpload = await request("/api/image/tasks");
+  expectStatus(tasksAfterAssetUpload, 200, "tasks after visible asset upload");
+  expect(tasksAfterAssetUpload.body.data.pagination.total === tasksBeforeAssetUpload.body.data.pagination.total, "visible asset upload should not create image tasks");
+
   const creditPackOrder = await request("/api/orders/credits", {
     method: "POST",
     body: JSON.stringify({ planId: "credits-500" })
@@ -606,6 +648,13 @@ async function runSmoke() {
   const creditsAfterProDownload = await request("/api/account/credits");
   expectStatus(creditsAfterProDownload, 200, "credits after Pro download");
   expect(creditsAfterProDownload.body.data.credits.credits === 1535, "Pro fair-use download should not spend credits beyond the Pro task cost");
+
+  const uploadedSourceTask = await request("/api/image/tasks", {
+    method: "POST",
+    body: JSON.stringify({ taskType: "i2i", prompt: "api smoke uploaded source task", sourceAssetId: uploadedAsset.id, count: 1, size: "1024x1024" })
+  });
+  expectStatus(uploadedSourceTask, 200, "create task from uploaded asset source");
+  expect(uploadedSourceTask.body.data.task.sourceAssetId === uploadedAsset.id, "uploaded assets should be usable as image-to-image source assets");
 
   const passwordChanged = await request("/api/auth/password", {
     method: "POST",

@@ -58,8 +58,9 @@ function filterAssets(assets: ImageAsset[], query: ListImageAssetsQuery) {
   return assets.filter(asset => {
     if (query.taskType && asset.taskType !== query.taskType) return false;
     if (query.status && asset.status !== query.status) return false;
+    if (query.origin && asset.origin !== query.origin) return false;
     if (query.q) {
-      const searchable = [asset.id, asset.title, asset.prompt, asset.taskId, asset.modelProvider, asset.modelName].join(" ");
+      const searchable = [asset.id, asset.title, asset.prompt, asset.taskId || "", asset.origin, asset.modelProvider, asset.modelName].join(" ");
       if (!includesText(searchable, query.q)) return false;
     }
     return true;

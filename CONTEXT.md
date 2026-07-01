@@ -60,6 +60,10 @@ _Avoid_: Generated result, model output
 The review outcome for a generated image before it becomes user-visible. V1 uses pending, approved, rejected, and skipped to leave room for later provider moderation or manual review.
 _Avoid_: Audit flag
 
+**Skipped Output Review**:
+The review status for an asset that did not come from a provider output and therefore does not enter generated-output review. User Uploaded Assets use this status after passing Upload Constraints.
+_Avoid_: Approved upload, unchecked generated output
+
 **System Failure**:
 A task failure caused by provider errors, timeout, storage failure, or server-side exceptions after credits have been held.
 _Avoid_: Technical failure
@@ -125,19 +129,35 @@ A stored copy of the user's relevant paid rights at the moment an order, asset, 
 _Avoid_: Current plan cache
 
 **Commercial Authorization Statement**:
-A product-visible statement for Pro-generated assets that records the platform-side commercial usage benefit available at generation time. It does not cover third-party rights in user uploads, trademarks, likeness, or external source material.
+A product-visible statement for Pro-generated assets that records the platform-side commercial usage benefit available at generation time. It is not shown on User Uploaded Assets and does not cover third-party rights in user uploads, trademarks, likeness, or external source material.
 _Avoid_: Full legal license
 
 **Asset Retention Policy**:
-The rule that decides how long generated assets stay visible in user history and when stored files can be physically cleaned up. V1 limits Free User visible history but keeps paid-user assets long-lived.
+The rule that decides how long generated and user uploaded assets stay visible in user history and when stored files can be physically cleaned up. V1 limits Free User visible history but keeps paid-user generated assets long-lived.
 _Avoid_: Storage cleanup
 
 **Soft Deleted Asset**:
-An asset hidden from the user interface by a deletedAt timestamp while database audit records and optional MinIO cleanup remain separate.
+A user-deleted asset hidden from normal asset center browsing by a deletedAt timestamp while database audit records, source relationships, and optional MinIO cleanup remain separate. Deleting a source asset does not delete assets that were generated from it.
 _Avoid_: Deleted file
 
+**User Uploaded Asset**:
+An image supplied by the user that is saved into the asset center as a first-class asset without being produced by an image task. In V1 it can be used as Image-to-Image source material only, and it does not receive platform-side commercial authorization for generated assets.
+_Avoid_: Generated result, temporary upload, Pro generated asset
+
+**Asset Display Title**:
+A user-facing name for an asset in the asset center. User Uploaded Assets default their display title from the original file name so they remain recognizable without a prompt.
+_Avoid_: Prompt, object key, asset id
+
+**Asset Origin**:
+The product source of an asset, such as generated or uploaded. Asset Origin is used to explain lifecycle and rights boundaries, but it is not a substitute for ownership or download authorization.
+_Avoid_: Task type, permission flag
+
+**Asset Upload Entry Point**:
+The user-facing place where a User Uploaded Asset is created. V1 treats the asset center upload button as the primary single-image entry point and the workspace reference-image area as a shortcut to the same capability.
+_Avoid_: Batch uploader, separate uploader, workspace-only upload
+
 **Upload Constraint**:
-The server-side file validation rules for source images and masks before an image task can be created. V1 accepts JPEG, PNG, and WebP source images up to 10MB and 4096px maximum edge, with server-side MIME, extension, and file signature checks.
+The server-side file validation rules for User Uploaded Assets, source images, and masks before they become usable in the product. V1 accepts JPEG, PNG, and WebP images up to 10MB and 4096px maximum edge, with server-side MIME, extension, and file signature checks.
 _Avoid_: Frontend upload hint
 
 **Credit Spend Priority**:
@@ -149,7 +169,7 @@ The standard credit cost for one unit of a billable capability before membership
 _Avoid_: Unit price, base price
 
 **Billable Capability**:
-A product action that can consume credits, such as Text-to-Image, Image-to-Image, Inpainting, Outpainting, or HD Download.
+A product action that can consume credits, such as Text-to-Image, Image-to-Image, or HD Download.
 _Avoid_: Paid feature
 
 **Free User**:
@@ -223,14 +243,6 @@ _Avoid_: T2I when writing product copy
 **Image-to-Image**:
 An image task that creates a variation from an existing source asset or uploaded source image.
 _Avoid_: I2I when writing product copy
-
-**Inpainting**:
-An image editing task that changes a selected region of an existing source asset.
-_Avoid_: Local redraw
-
-**Outpainting**:
-An image editing task that expands the canvas of an existing source asset.
-_Avoid_: Expansion
 
 **Limited Trial Capability**:
 A capability available to Free Users with tighter quantity, file size, concurrency, or frequency limits than paid users.

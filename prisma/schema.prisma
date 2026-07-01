@@ -98,6 +98,11 @@ enum OutputReviewStatus {
   skipped
 }
 
+enum AssetOrigin {
+  generated
+  uploaded
+}
+
 enum UploadKind {
   source
   mask
@@ -411,8 +416,9 @@ model ImageAsset {
   id                              String             @id @default(cuid()) @db.VarChar(191)
   taskId                          String?            @map("task_id") @db.VarChar(191)
   userId                          String             @map("user_id") @db.VarChar(191)
+  origin                          AssetOrigin        @default(generated)
   title                           String             @db.VarChar(160)
-  taskType                        GenerationMode     @map("task_type")
+  taskType                        GenerationMode?    @map("task_type")
   prompt                          String             @db.Text
   objectKey                       String             @unique @map("object_key") @db.VarChar(255)
   publicUrl                       String             @map("public_url") @db.VarChar(512)

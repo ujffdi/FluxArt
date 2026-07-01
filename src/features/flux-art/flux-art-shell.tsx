@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   ApiClientError,
   createBillingOrder,
@@ -16,13 +16,15 @@ import {
   loginWithPassword,
   logoutCurrentSession,
   registerAccount,
-  runImageTask
+  runImageTask,
+  uploadImageAsset
 } from "@/features/flux-art/api/image-workspace-client";
 import { toTaskType, type ProductPage, type SessionState, useImageWorkspaceStore } from "@/features/flux-art/stores/image-workspace-store";
 import type { AuthAccount } from "@/types/auth";
 import type { BillingOrder, BillingPlanId } from "@/types/billing";
 import type {
   AccountCreditsSummary,
+  AssetOrigin,
   AssetStatus,
   AssetVersionNode,
   DownloadDecision,
@@ -53,6 +55,12 @@ const assetStatusOptions: Array<{ value: "" | AssetStatus; label: string }> = [
   { value: "reviewing", label: "审核中" },
   { value: "processing", label: "生成中" },
   { value: "failed", label: "失败" }
+];
+
+const assetOriginOptions: Array<{ value: "" | AssetOrigin; label: string }> = [
+  { value: "", label: "全部来源" },
+  { value: "generated", label: "AI 生成" },
+  { value: "uploaded", label: "用户上传" }
 ];
 
 const defaultTextPrompt = "一张用于电商主图的现代香薰产品摄影，暗色背景，柔和边缘光，真实材质，高级商业摄影";
@@ -120,6 +128,22 @@ function getInAppBillingPaymentPath(paymentUrl: string) {
 function taskTimestamp(task: ImageGenerationTask) {
   const timestamp = Date.parse(task.updatedAt || task.createdAt);
   return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function assetOriginLabel(origin: AssetOrigin) {
+  return origin === "uploaded" ? "用户上传" : "AI 生成";
+}
+
+function assetTypeLabel(asset: ImageAsset) {
+  if (asset.origin === "uploaded") return "用户上传";
+  if (asset.taskType === "t2i") return "文生图";
+  if (asset.taskType === "i2i") return "图生图";
+  return asset.taskType || "AI 生成";
+}
+
+function assetSourceText(asset: ImageAsset) {
+  if (asset.origin === "uploaded") return "用户上传资产";
+  return asset.taskId ? `来源任务 ${asset.taskId}` : "来源任务已缺失";
 }
 
 function pickTaskForDisplay(sessionTask: ImageGenerationTask, serverTask: ImageGenerationTask) {
@@ -303,26 +327,30 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
+  async function ensureAuth(action: string) {
+    if (hasServerSession) return true;
+
+    try {
+      const auth = await getCurrentAuthSession();
+      setAuthAccount(auth.account);
+      useImageWorkspaceStore.getState().setSessionState("logged-in");
+      setServerError("");
+      return true;
+    } catch (error) {
+      if (error instanceof ApiClientError && error.status === 401) {
+        clearSessionOwnedState();
+        useImageWorkspaceStore.getState().setSessionState("guest");
+        setAuthModal(action);
+        return false;
+      }
+      store.showToast(`登录状态校验失败：${errorMessage(error, "请稍后重试")}`);
+      return false;
+    }
+  }
+
   function requireAuth(action: string, done: () => void | Promise<void>) {
     void (async () => {
-      if (!hasServerSession) {
-        try {
-          const auth = await getCurrentAuthSession();
-          setAuthAccount(auth.account);
-          useImageWorkspaceStore.getState().setSessionState("logged-in");
-          setServerError("");
-        } catch (error) {
-          if (error instanceof ApiClientError && error.status === 401) {
-            clearSessionOwnedState();
-            useImageWorkspaceStore.getState().setSessionState("guest");
-            setAuthModal(action);
-            return;
-          }
-          store.showToast(`登录状态校验失败：${errorMessage(error, "请稍后重试")}`);
-          return;
-        }
-      }
-
+      if (!(await ensureAuth(action))) return;
       await done();
     })();
   }
@@ -384,6 +412,21 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
         store.showToast(`任务提交失败：${workspaceErrorMessage(error, "请稍后重试")}`);
       }
     });
+  }
+
+  async function uploadAsset(file: File, options: { useAsSource?: boolean } = {}) {
+    if (!(await ensureAuth("上传图片"))) return;
+
+    try {
+      const asset = await uploadImageAsset(file);
+      setServerAssets(current => [asset, ...current.filter(item => item.id !== asset.id)]);
+      store.setSelectedAssetId(asset.id);
+      if (options.useAsSource) store.setGenerationMode("img");
+      store.showToast(options.useAsSource ? "图片已上传并设为图生图参考图" : "图片已上传到资产中心");
+      void loadSessionOwnedState(authAccount || undefined);
+    } catch (error) {
+      store.showToast(`上传失败：${workspaceErrorMessage(error, "请检查图片格式、大小或稍后重试")}`);
+    }
   }
 
   async function openDownload(assetId = store.selectedAssetId) {
@@ -514,6 +557,7 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
           onGenerationCountChange={store.setGenerationCount}
           onStylePresetChange={setStylePreset}
           onGenerate={createGenerationTask}
+          onUploadAsset={file => uploadAsset(file, { useAsSource: true })}
           onDownload={openDownload}
           onUseAsSource={assetId => {
             store.setSelectedAssetId(assetId);
@@ -545,6 +589,7 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
           onSelectAsset={store.setSelectedAssetId}
           onDownload={openDownload}
           onDelete={removeAsset}
+          onUploadAsset={file => uploadAsset(file)}
           onImageToImage={() => {
             store.setGenerationMode("img");
             store.showToast("已切换到图生图：历史资产已作为 sourceAssetId");
@@ -640,6 +685,7 @@ function WorkspacePage({
   onGenerationCountChange,
   onStylePresetChange,
   onGenerate,
+  onUploadAsset,
   onDownload,
   onUseAsSource,
   onShortcutToImageMode,
@@ -676,6 +722,7 @@ function WorkspacePage({
   onGenerationCountChange: (count: number) => void;
   onStylePresetChange: (stylePreset: string) => void;
   onGenerate: () => void;
+  onUploadAsset: (file: File) => Promise<void>;
   onDownload: (assetId?: string) => void;
   onUseAsSource: (assetId: string) => void;
   onShortcutToImageMode: () => void;
@@ -698,7 +745,7 @@ function WorkspacePage({
         <aside className="panel">
           <div className="panel-head"><h2>{imageMode ? "图生图参数" : "文生图参数"}</h2><span className="badge">预计 {imageMode ? 32 : 18} 积分</span></div>
           <div className="panel-body">
-            {imageMode && <UploadField selectedAsset={selectedAsset} />}
+            {imageMode && <UploadField selectedAsset={selectedAsset} onUploadAsset={onUploadAsset} />}
             <div className="field">
               <label>{imageMode ? "修改方向说明" : "Prompt"}</label>
               <textarea
@@ -864,7 +911,41 @@ function WorkspaceResultStage({
   );
 }
 
-function UploadField({ selectedAsset }: { selectedAsset?: ImageAsset }) {
+function AssetUploadButton({
+  onUpload,
+  label = "上传图片",
+  className = "btn primary"
+}: {
+  onUpload: (file: File) => Promise<void>;
+  label?: string;
+  className?: string;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+
+  return (
+    <>
+      <button className={className} type="button" disabled={uploading} onClick={() => inputRef.current?.click()}>
+        {uploading ? "上传中..." : label}
+      </button>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/jpeg,image/png,image/webp"
+        hidden
+        onChange={event => {
+          const file = event.currentTarget.files?.[0];
+          event.currentTarget.value = "";
+          if (!file) return;
+          setUploading(true);
+          void onUpload(file).finally(() => setUploading(false));
+        }}
+      />
+    </>
+  );
+}
+
+function UploadField({ selectedAsset, onUploadAsset }: { selectedAsset?: ImageAsset; onUploadAsset: (file: File) => Promise<void> }) {
   return (
     <div className="field">
       <label>参考图 / sourceAssetId</label>
@@ -882,6 +963,7 @@ function UploadField({ selectedAsset }: { selectedAsset?: ImageAsset }) {
         <div className="chips">
           {selectedAsset && <span className="chip active">使用 {selectedAsset.id}</span>}
           <Link className="chip" href="/workspace/image/assets">从资产中心选择</Link>
+          <AssetUploadButton className="chip" label="上传参考图" onUpload={onUploadAsset} />
           <span className={`status ${selectedAsset ? "ok" : "wait"}`}>{selectedAsset ? "源图已就绪" : "等待选择"}</span>
         </div>
       </div>
@@ -913,6 +995,7 @@ function AssetsPage({
   onSelectAsset,
   onDownload,
   onDelete,
+  onUploadAsset,
   onImageToImage
 }: {
   selectedAssetId: string;
@@ -923,6 +1006,7 @@ function AssetsPage({
   onSelectAsset: (assetId: string) => void;
   onDownload: (assetId?: string) => void;
   onDelete: (assetId?: string) => void;
+  onUploadAsset: (file: File) => Promise<void>;
   onImageToImage: () => void;
 }) {
   const [filteredAssets, setFilteredAssets] = useState<ImageAsset[] | null>(null);
@@ -931,12 +1015,13 @@ function AssetsPage({
   const [query, setQuery] = useState("");
   const [taskType, setTaskType] = useState<"" | GenerationMode>("");
   const [status, setStatus] = useState<"" | AssetStatus>("");
+  const [origin, setOrigin] = useState<"" | AssetOrigin>("");
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
   const visibleAssets = filteredAssets || initialAssets;
   const visibleVersionNodes = filteredVersionNodes || initialVersionNodes;
   const selected = visibleAssets.find(asset => asset.id === selectedAssetId) || initialAssets.find(asset => asset.id === selectedAssetId) || visibleAssets[0] || initialAssets[0];
-  const filtersActive = Boolean(query || taskType || status);
+  const filtersActive = Boolean(query || taskType || status || origin);
 
   useEffect(() => {
     let active = true;
@@ -958,7 +1043,8 @@ function AssetsPage({
         pageSize: 20,
         q: query,
         taskType: taskType || undefined,
-        status: status || undefined
+        status: status || undefined,
+        origin: origin || undefined
       };
 
       setLoading(true);
@@ -986,7 +1072,7 @@ function AssetsPage({
     return () => {
       active = false;
     };
-  }, [query, sessionHydrated, sessionState, taskType, status]);
+  }, [query, sessionHydrated, sessionState, taskType, status, origin]);
 
   if (!selected) {
     const emptyMessage = !sessionHydrated
@@ -998,7 +1084,10 @@ function AssetsPage({
           : "暂无资产。生成图片成功后，结果会进入资产中心并显示版本链和下载权限。";
 
     return (
-      <section aria-label="图片资产中心">
+      <section className="ai-workspace module-workspace assets-page" aria-label="图片资产中心">
+        <section className="toolbar" aria-label="资产操作区">
+          <AssetUploadButton onUpload={onUploadAsset} />
+        </section>
         <div className="empty-card">{emptyMessage}</div>
         {loadError && <div className="api-state bad">{loadError}</div>}
       </section>
@@ -1006,9 +1095,12 @@ function AssetsPage({
   }
 
   return (
-    <section aria-label="图片资产中心">
+    <section className="ai-workspace module-workspace assets-page" aria-label="图片资产中心">
       <section className="toolbar" aria-label="筛选区">
-        <input className="input" aria-label="搜索资产" placeholder="搜索 Prompt、任务 ID、文件名" value={query} onChange={event => setQuery(event.target.value)} />
+        <input className="input" aria-label="搜索资产" placeholder="搜索标题、Prompt、任务 ID" value={query} onChange={event => setQuery(event.target.value)} />
+        <select className="select" aria-label="资产来源筛选" value={origin} onChange={event => setOrigin(event.target.value as "" | AssetOrigin)}>
+          {assetOriginOptions.map(option => <option key={option.value || "all"} value={option.value}>{option.label}</option>)}
+        </select>
         <select className="select" aria-label="任务类型筛选" value={taskType} onChange={event => setTaskType(event.target.value as "" | GenerationMode)}>
           {taskTypeOptions.map(option => <option key={option.value || "all"} value={option.value}>{option.label}</option>)}
         </select>
@@ -1016,6 +1108,7 @@ function AssetsPage({
           {assetStatusOptions.map(option => <option key={option.value || "all"} value={option.value}>{option.label}</option>)}
         </select>
         <select className="select" aria-label="资产排序"><option>按最近生成排序</option><option>按下载时间排序</option></select>
+        <AssetUploadButton onUpload={onUploadAsset} />
       </section>
       <div className="api-state" role="status" aria-live="polite">
         {loading ? "正在从 API 加载资产列表..." : pagination ? `API 列表：第 ${pagination.page} 页，共 ${pagination.total} 张资产` : "本地资产列表"}
@@ -1024,13 +1117,13 @@ function AssetsPage({
       <section className="asset-layout">
         <div className="masonry">
           {visibleAssets.length === 0 && <div className="empty-card">没有匹配的资产。请调整搜索词、任务类型或状态筛选。</div>}
-          {visibleAssets.map(asset => <button className={`asset ${asset.id === selectedAssetId ? "active" : ""}`} key={asset.id} type="button" onClick={() => onSelectAsset(asset.id)}><div className="pic" style={{ backgroundImage: `linear-gradient(135deg, rgba(124, 92, 255, 0.28), rgba(24, 214, 194, 0.12)), url(${asset.imageUrl})` }} /><div className="meta"><div className="line"><strong>{asset.title}</strong><span className={`status ${asset.status === "succeeded" ? "ok" : asset.status === "processing" || asset.status === "reviewing" ? "wait" : "bad"}`}>{asset.status}</span></div><p className="small">{asset.id} · {asset.taskType} · {asset.createdAt} · {asset.modelProvider}/{asset.modelName}</p></div></button>)}
+          {visibleAssets.map(asset => <button className={`asset ${asset.id === selectedAssetId ? "active" : ""}`} key={asset.id} type="button" onClick={() => onSelectAsset(asset.id)}><div className="pic" style={{ backgroundImage: `linear-gradient(135deg, rgba(223, 60, 159, 0.3), rgba(239, 90, 102, 0.14)), url(${asset.imageUrl})` }} /><div className="meta"><div className="line"><strong>{asset.title}</strong><span className={`status ${asset.status === "succeeded" ? "ok" : asset.status === "processing" || asset.status === "reviewing" ? "wait" : "bad"}`}>{asset.status}</span></div><p className="small">{asset.id} · {assetOriginLabel(asset.origin)} · {assetTypeLabel(asset)} · {asset.createdAt}</p></div></button>)}
         </div>
         <aside className="asset-side">
           <h2>{selected.title}</h2>
-          <div className="preview-img" style={{ backgroundImage: `linear-gradient(135deg, rgba(124, 92, 255, 0.3), rgba(24, 214, 194, 0.13)), url(${selected.imageUrl})` }} />
-          <p className="small">{selected.id} · {selected.taskType} · {selected.status} · 来源任务 {selected.taskId}</p>
-          {selected.commercialAuthorizationStatement && <p className="notice">{selected.commercialAuthorizationStatement}</p>}
+          <div className="preview-img" style={{ backgroundImage: `linear-gradient(135deg, rgba(223, 60, 159, 0.32), rgba(239, 90, 102, 0.15)), url(${selected.imageUrl})` }} />
+          <p className="small">{selected.id} · {assetOriginLabel(selected.origin)} · {assetTypeLabel(selected)} · {selected.status} · {assetSourceText(selected)}</p>
+          {selected.origin === "generated" && selected.commercialAuthorizationStatement && <p className="notice">{selected.commercialAuthorizationStatement}</p>}
           <div className="actions"><button className="btn primary" type="button" onClick={() => onDownload(selected.id)}>下载</button><Link className="btn" href="/workspace/image" onClick={onImageToImage}>继续图生图</Link><button className="btn" type="button" onClick={() => onDelete(selected.id)}>删除</button></div>
           <div className="timeline"><strong>版本链</strong>{visibleVersionNodes.map(node => <div className="node" key={node.id}><span className="dot" /><div className="rel">{node.label}</div></div>)}</div>
         </aside>

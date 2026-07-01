@@ -43,6 +43,14 @@ function extensionForFormat(format: string) {
   return format === "jpeg" ? "jpg" : format;
 }
 
+function displayTitleFromFileName(fileName?: string) {
+  const trimmed = fileName?.trim();
+  if (!trimmed) return "用户上传图片";
+  const baseName = trimmed.split(/[\\/]/).pop() || trimmed;
+  const withoutExtension = baseName.replace(/\.[^.]+$/, "").trim();
+  return (withoutExtension || "用户上传图片").slice(0, 80);
+}
+
 async function prepareUploadBuffer(kind: UploadKind, input: Buffer) {
   if (input.byteLength > maxUploadBytes) {
     throw new UploadValidationError("image upload must be 10MB or smaller", "UPLOAD_TOO_LARGE");
@@ -116,6 +124,43 @@ export async function createImageUpload(input: { userId: string; kind: UploadKin
   return getRepositories().image.createUpload(upload);
 }
 
+export async function createUserUploadedAsset(input: { userId: string; fileName?: string; bytes: Buffer }) {
+  const prepared = await prepareUploadBuffer("source", input.bytes);
+  const objectKey = createObjectKey({
+    userId: input.userId,
+    kind: "asset",
+    extension: prepared.extension
+  });
+  const stored = await putObject({
+    objectKey,
+    body: prepared.body,
+    contentType: prepared.mimeType
+  });
+  const now = new Date().toISOString();
+  const asset: ImageAsset = {
+    id: `asset-${randomUUID()}`,
+    userId: input.userId,
+    title: displayTitleFromFileName(input.fileName),
+    origin: "uploaded",
+    status: "succeeded",
+    prompt: "",
+    imageUrl: stored.publicUrl,
+    objectKey: stored.objectKey,
+    publicUrl: stored.publicUrl,
+    mimeType: prepared.mimeType,
+    sizeBytes: prepared.body.byteLength,
+    width: prepared.width,
+    height: prepared.height,
+    reviewStatus: "skipped",
+    downloadState: "not_downloaded",
+    modelProvider: "user",
+    modelName: "uploaded-image",
+    createdAt: now
+  };
+
+  return getRepositories().image.createAsset(asset);
+}
+
 export async function storeGeneratedOutput(input: { task: ImageGenerationTask; bytes: Buffer }): Promise<StoredGeneratedOutput> {
   const prepared = await prepareUploadBuffer("source", input.bytes);
   const objectKey = createObjectKey({
@@ -150,6 +195,7 @@ export async function createGeneratedAsset(input: { task: ImageGenerationTask; t
     id: `asset-${randomUUID()}`,
     userId: input.task.userId,
     title: input.title || input.task.prompt.slice(0, 80) || "Generated asset",
+    origin: "generated",
     taskId: input.task.id,
     taskType: input.task.taskType,
     status: reviewStatus === "approved" ? "succeeded" : "reviewing",

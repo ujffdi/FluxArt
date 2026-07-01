@@ -17,6 +17,7 @@ const routes = [
 ];
 const hintContrastSelectors = [".toast.show", ".notice", ".chip", ".status", ".badge", ".small", ".api-state"];
 const minimumTextContrast = 4.5;
+const tinyPngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
 
 let serverProcess;
 
@@ -186,8 +187,8 @@ async function run() {
     await assertLightThemeHintContrast(page);
 
     await page.goto(`${baseUrl}/workspace/account`);
-    await page.getByText("游客模式").waitFor({ timeout: 10000 });
-    await page.getByText("积分 0").waitFor({ timeout: 10000 });
+    await page.getByText("游客模式").first().waitFor({ state: "attached", timeout: 10000 });
+    await page.getByText("积分 0").first().waitFor({ state: "attached", timeout: 10000 });
     await page.getByText("未登录", { exact: true }).first().waitFor({ timeout: 10000 });
 
     const username = `browser_${Date.now().toString(36)}`;
@@ -201,22 +202,41 @@ async function run() {
     }, username);
     if (registrationPayload.status !== 200) fail(`register browser smoke account: expected HTTP 200, received ${registrationPayload.status}`);
     await page.reload();
-    await page.getByText("已登录 · Browser Smoke").waitFor({ timeout: 10000 });
-    await page.getByText("积分 60").waitFor({ timeout: 10000 });
+    await page.getByText("已登录 · Browser Smoke").first().waitFor({ state: "attached", timeout: 10000 });
+    await page.getByText("积分 60").first().waitFor({ state: "attached", timeout: 10000 });
 
     await page.locator("header").getByRole("button", { name: "退出", exact: true }).click();
     await page.getByRole("button", { name: "确认退出" }).click();
-    await page.getByText("游客模式").waitFor({ timeout: 10000 });
-    await page.getByText("积分 0").waitFor({ timeout: 10000 });
+    await page.getByText("游客模式").first().waitFor({ state: "attached", timeout: 10000 });
+    await page.getByText("积分 0").first().waitFor({ state: "attached", timeout: 10000 });
 
     await page.getByRole("button", { name: "登录" }).click();
     await page.getByLabel("用户名").fill(username);
     await page.getByLabel("密码").fill("browser-password-1");
     await page.getByRole("button", { name: "立即登录" }).click();
-    await page.getByText("已登录 · Browser Smoke").waitFor({ timeout: 10000 });
+    await page.getByText("已登录 · Browser Smoke").first().waitFor({ state: "attached", timeout: 10000 });
     await page.getByText("server session 已验证").waitFor({ timeout: 10000 });
     await page.getByText(`${username} · 积分充足`).waitFor({ timeout: 10000 });
     await page.getByText("积分校验").waitFor({ timeout: 10000 });
+
+    const uploadedAssetPayload = await page.evaluate(async base64 => {
+      const bytes = Uint8Array.from(atob(base64), char => char.charCodeAt(0));
+      const form = new FormData();
+      form.set("file", new File([bytes], "browser-upload.png", { type: "image/png" }));
+      const response = await fetch("/api/image/assets/upload", { method: "POST", body: form });
+      return { status: response.status, body: await response.json() };
+    }, tinyPngBase64);
+    if (uploadedAssetPayload.status !== 200) fail(`upload browser smoke asset: expected HTTP 200, received ${uploadedAssetPayload.status}`);
+    const uploadedAsset = uploadedAssetPayload.body?.data?.asset;
+    if (uploadedAsset?.origin !== "uploaded") fail("browser smoke uploaded asset should have uploaded origin");
+    await page.goto(`${baseUrl}/workspace/image/assets`);
+    await page.getByText("browser-upload").first().waitFor({ timeout: 10000 });
+    await page.getByLabel("资产来源筛选").selectOption("uploaded");
+    await page.getByText(uploadedAsset.id).first().waitFor({ timeout: 10000 });
+    await page.getByText(`${uploadedAsset.id} · 用户上传`, { exact: false }).first().waitFor({ timeout: 10000 });
+    await page.getByText(uploadedAsset.id).first().click();
+    await page.getByRole("link", { name: "继续图生图" }).click();
+    await page.getByText(`使用 ${uploadedAsset.id}`).waitFor({ timeout: 10000 });
 
     const prompt = `browser smoke asset for asset UI ${Date.now()}`;
     const taskPayload = await page.evaluate(async prompt => {

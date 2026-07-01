@@ -1,7 +1,9 @@
 import {
+  assetOrigins,
   assetStatuses,
   generationModes,
   taskStatuses,
+  type AssetOrigin,
   type AssetStatus,
   type GenerationMode,
   type ListImageAssetsQuery,
@@ -26,6 +28,10 @@ function isTaskStatus(value: string): value is TaskStatus {
 
 function isAssetStatus(value: string): value is AssetStatus {
   return assetStatuses.some(status => status === value);
+}
+
+function isAssetOrigin(value: string): value is AssetOrigin {
+  return assetOrigins.some(origin => origin === value);
 }
 
 function parsePositiveInt(searchParams: URLSearchParams, key: "page" | "pageSize"): number | QueryParseError | undefined {
@@ -115,6 +121,15 @@ export function parseAssetListQuery(searchParams: URLSearchParams): QueryParseRe
     parsedStatus = status;
   }
 
+  const origin = searchParams.get("origin");
+  let parsedOrigin: AssetOrigin | undefined;
+  if (origin) {
+    if (!isAssetOrigin(origin)) {
+      return { ok: false, error: { message: "unsupported asset origin", errorCode: "ASSET_ORIGIN_UNSUPPORTED" } };
+    }
+    parsedOrigin = origin;
+  }
+
   return {
     ok: true,
     query: {
@@ -122,6 +137,7 @@ export function parseAssetListQuery(searchParams: URLSearchParams): QueryParseRe
       pageSize: pagination.pageSize,
       taskType: parsedTaskType,
       status: parsedStatus,
+      origin: parsedOrigin,
       q: parseQ(searchParams)
     }
   };

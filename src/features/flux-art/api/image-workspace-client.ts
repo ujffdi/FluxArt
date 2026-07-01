@@ -149,6 +149,17 @@ export async function deleteImageAsset(assetId: string): Promise<ImageAsset> {
   return payload.asset;
 }
 
+export async function uploadImageAsset(file: File): Promise<ImageAsset> {
+  const form = new FormData();
+  form.set("file", file);
+  const payload = await requestApi<{ asset: ImageAsset }>("/api/image/assets/upload", {
+    method: "POST",
+    body: form
+  });
+
+  return payload.asset;
+}
+
 export async function createBillingOrder(planId: BillingPlanId): Promise<BillingOrder> {
   const endpoint = planId === "pro-monthly" ? "/api/orders/membership" : "/api/orders/credits";
   const payload = await requestApi<{ order: BillingOrder }>(endpoint, {
