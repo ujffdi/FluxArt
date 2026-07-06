@@ -12,7 +12,7 @@ import type {
   StructureMode
 } from "@/types/image";
 import { pollImageGenerationResult, submitImageGeneration } from "@/server/image/ai/image-model-adapter";
-import { getEnvImageModelConfig, resolveImageModelForTask } from "@/server/image/ai/model-config";
+import { getEnvImageModelConfig, listSelectableImageModels, resolveImageModelForTask } from "@/server/image/ai/model-config";
 import { getRepositories } from "@/server/data/repositories";
 import { CreditBalanceError, finalizeCreditHoldSpend, getAvailableCredits, refundCreditHold, releaseCreditHold, reserveCreditsForGeneration, settleCreditHoldPartially, spendCreditsForDownload } from "@/server/credits/credit-service";
 import { createGeneratedAsset, storeGeneratedOutput, UploadValidationError, type StoredGeneratedOutput } from "@/server/image/storage/upload-service";
@@ -183,11 +183,7 @@ export async function createTask(input: CreateImageTaskInput, userId?: string): 
       requestPayload: {
         ...input,
         selectedImageModelId: resolvedModel.model.id,
-        modelSelectionFallbackReason: resolvedModel.fallbackReason,
-        modelBaseUrl: resolvedModel.model.baseUrl,
-        modelApiKeySecretRef: resolvedModel.model.apiKeySecretRef,
-        modelExecutionMode: resolvedModel.model.executionMode,
-        modelRequestTimeoutMs: resolvedModel.model.requestTimeoutMs
+        modelSelectionFallbackReason: resolvedModel.fallbackReason
       },
       modelProvider: resolvedModel.model.provider,
       modelName: resolvedModel.model.model,
@@ -285,16 +281,22 @@ function requestPayloadStructureMode(payload: Record<string, unknown>): Structur
   return value === "balanced" || value === "outline" || value === "pose" ? value : undefined;
 }
 
-function modelConfigFromTaskSnapshot(task: ImageGenerationTask) {
+async function modelConfigFromTaskSnapshot(task: ImageGenerationTask) {
   const fallback = getEnvImageModelConfig();
+  const selectedImageModelId = requestPayloadString(task.requestPayload, "selectedImageModelId");
+  const models = await listSelectableImageModels();
+  const persistedModel = selectedImageModelId
+    ? models.find(model => model.id === selectedImageModelId && model.provider === task.modelProvider && model.model === task.modelName)
+    : undefined;
+  const matchingModel = persistedModel || models.find(model => model.provider === task.modelProvider && model.model === task.modelName);
   const executionMode = requestPayloadString(task.requestPayload, "modelExecutionMode");
   return {
     provider: task.modelProvider,
     model: task.modelName,
-    executionMode: executionMode === "live" || executionMode === "mock" ? executionMode : fallback.executionMode,
-    requestTimeoutMs: requestPayloadNumber(task.requestPayload, "modelRequestTimeoutMs") || fallback.requestTimeoutMs,
-    baseUrl: requestPayloadString(task.requestPayload, "modelBaseUrl") || fallback.baseUrl,
-    apiKeySecretRef: requestPayloadString(task.requestPayload, "modelApiKeySecretRef") || fallback.apiKeySecretRef
+    executionMode: matchingModel?.executionMode || (executionMode === "live" || executionMode === "mock" ? executionMode : fallback.executionMode),
+    requestTimeoutMs: matchingModel?.requestTimeoutMs || requestPayloadNumber(task.requestPayload, "modelRequestTimeoutMs") || fallback.requestTimeoutMs,
+    baseUrl: matchingModel?.baseUrl || requestPayloadString(task.requestPayload, "modelBaseUrl") || fallback.baseUrl,
+    apiKeySecretRef: matchingModel?.apiKeySecretRef || requestPayloadString(task.requestPayload, "modelApiKeySecretRef") || fallback.apiKeySecretRef
   };
 }
 
@@ -395,7 +397,7 @@ async function continueAsyncImageTask(task: ImageGenerationTask, userId?: string
     provider: String(task.modelProvider),
     modelName: task.modelName,
     externalTaskId,
-    modelConfig: modelConfigFromTaskSnapshot(task)
+    modelConfig: await modelConfigFromTaskSnapshot(task)
   });
   const outputBytesList = outputBytesListFromSubmission(submission);
   if (submission.providerMode !== "sync" || outputBytesList.length === 0) return task;
@@ -427,7 +429,7 @@ export async function runImageTask(taskId: string, userId?: string) {
       stylePreset: requestPayloadString(task.requestPayload, "stylePreset"),
       strength: requestPayloadNumber(task.requestPayload, "strength"),
       structureMode: requestPayloadStructureMode(task.requestPayload),
-      modelConfig: modelConfigFromTaskSnapshot(task)
+      modelConfig: await modelConfigFromTaskSnapshot(task)
     });
     const submissionId = `submission-${task.id}`;
     await repositories.image.createProviderSubmission({

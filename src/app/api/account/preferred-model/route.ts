@@ -1,25 +1,19 @@
-import { getRepositories } from "@/server/data/repositories";
 import { getRequestSession, renewSessionCookie } from "@/server/auth/request-auth";
-import { getUserModelSelectionState } from "@/server/image/ai/model-config";
+import { PreferredModelError, savePreferredImageModel } from "@/server/image/business/preferred-model-service";
 import { fail, ok } from "@/server/shared/api-response";
 
 export async function POST(request: Request) {
   const session = await getRequestSession();
   if (!session) return fail("authentication is required", 401, "AUTH_REQUIRED");
-  const repositories = getRepositories();
-  const account = await repositories.account.getCurrentAccount(session.account.userId);
-  if (account.memberStatus !== "credit_pack") {
-    return fail("model selection requires purchased credits", 403, "MODEL_SELECTION_REQUIRES_PURCHASE");
-  }
 
   const body = await request.json().catch(() => ({})) as { modelId?: unknown };
-  const modelId = typeof body.modelId === "string" ? body.modelId : undefined;
-  const state = await getUserModelSelectionState(account, modelId);
-  if (!modelId || !state.models.some(model => model.id === modelId)) {
-    return fail("selected model is not available", 400, "MODEL_SELECTION_UNAVAILABLE");
+  try {
+    const modelSelection = await savePreferredImageModel(session.account.userId, body.modelId);
+    return renewSessionCookie(ok({ modelSelection }), session.sessionToken, session.session);
+  } catch (error) {
+    if (error instanceof PreferredModelError) {
+      return fail(error.message, error.status, error.code);
+    }
+    return fail("preferred model save failed", 500, "PREFERRED_MODEL_SAVE_FAILED");
   }
-
-  await repositories.account.updatePreferredImageModel(session.account.userId, modelId);
-  const nextState = await getUserModelSelectionState({ ...account, preferredImageModelId: modelId }, modelId);
-  return renewSessionCookie(ok({ modelSelection: nextState }), session.sessionToken, session.session);
 }

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "playwright";
@@ -8,6 +9,18 @@ const port = process.env.SMOKE_PORT || "3118";
 const baseUrl = explicitBaseUrl || `http://127.0.0.1:${port}`;
 const nextBin = "./node_modules/.bin/next";
 const buildMarker = ".next/BUILD_ID";
+const mockPaymentEnv = {
+  MAPAY_API_URL: "",
+  MAPAY_MERCHANT_ID: "mock-merchant",
+  MAPAY_SIGNING_SECRET: "mock-epay-secret",
+  MAPAY_NOTIFY_URL: `http://127.0.0.1:${port}/api/payments/mapay/notify`,
+  MAPAY_RETURN_URL: `http://127.0.0.1:${port}/api/payments/mapay/return`,
+  EPAY_API_URL: "",
+  EPAY_MERCHANT_ID: "mock-merchant",
+  EPAY_SIGNING_SECRET: "mock-epay-secret",
+  EPAY_NOTIFY_URL: `http://127.0.0.1:${port}/api/payments/epay/notify`,
+  EPAY_RETURN_URL: `http://127.0.0.1:${port}/api/payments/epay/return`
+};
 
 const routes = [
   "/workspace/image",
@@ -27,6 +40,30 @@ function log(message) {
 
 function fail(message) {
   throw new Error(message);
+}
+
+function epaySigningSecret() {
+  return process.env.MAPAY_SIGNING_SECRET
+    || process.env.MAPAY_SECRET
+    || process.env.MAPAY_KEY
+    || process.env.EPAY_SIGNING_SECRET
+    || process.env.EPAY_SECRET
+    || process.env.EPAY_KEY
+    || mockPaymentEnv.MAPAY_SIGNING_SECRET
+    || "mock-epay-secret";
+}
+
+function epayMerchantId() {
+  return process.env.MAPAY_MERCHANT_ID || process.env.MAPAY_PID || process.env.EPAY_MERCHANT_ID || process.env.EPAY_PID || mockPaymentEnv.MAPAY_MERCHANT_ID || "mock-merchant";
+}
+
+function signEpayParams(params, secret = epaySigningSecret()) {
+  const query = Object.entries(params)
+    .filter(([key, value]) => key !== "sign" && key !== "sign_type" && value !== "")
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("&");
+  return createHash("md5").update(`${query}${secret}`).digest("hex");
 }
 
 function parseRgbColor(value) {
@@ -149,8 +186,10 @@ function startServerIfNeeded() {
   serverProcess = spawn(nextBin, ["start", "-H", "127.0.0.1", "-p", port], {
     env: {
       ...process.env,
+      ...mockPaymentEnv,
       FLUXART_DATA_MODE: process.env.FLUXART_DATA_MODE || "mock",
       FLUXART_ADMIN_USERNAMES: process.env.FLUXART_ADMIN_USERNAMES || "tongsr",
+      FLUXART_ADMIN_SECRET: process.env.FLUXART_ADMIN_SECRET || "browser-smoke-admin-secret-valid-123",
       IMAGE_MODEL_EXECUTION: "mock"
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -242,6 +281,39 @@ async function run() {
       if (await page.getByLabel("Model").inputValue() !== smokeModel) fail("admin model test should preserve the unsaved model input");
       if (await page.getByLabel("Base URL").inputValue() !== smokeBaseUrl) fail("admin model test should preserve the unsaved base URL input");
       if (await page.getByLabel("Secret Ref").inputValue() !== smokeSecretRef) fail("admin model test should preserve the unsaved secret ref input");
+      const savedSelectableModels = await page.evaluate(async () => {
+        const response = await fetch("/api/admin/model-config", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            models: [{
+              id: "agnes-image-2-1-flash",
+              displayName: "Agnes Image 2.1 Flash",
+              provider: "agnes",
+              model: "agnes-image-2.1-flash",
+              baseUrl: "https://apihub.agnes-ai.com/v1",
+              apiKeySecretRef: "FLUXART_IMAGE_API_KEY",
+              executionMode: "mock",
+              requestTimeoutMs: 120000,
+              enabled: true,
+              isDefault: true
+            }, {
+              id: "premium-model",
+              displayName: "Premium Smoke Model",
+              provider: "custom",
+              model: "premium-smoke-model",
+              baseUrl: "https://provider.example.test/premium/v1",
+              apiKeySecretRef: "premium.api-key",
+              executionMode: "mock",
+              requestTimeoutMs: 660000,
+              enabled: true,
+              isDefault: false
+            }]
+          })
+        });
+        return { status: response.status, body: await response.json() };
+      });
+      if (savedSelectableModels.status !== 200) fail(`admin selectable model save should return HTTP 200, received ${savedSelectableModels.status}`);
       await page.goto(`${baseUrl}/workspace/account`);
       await page.locator("header").getByRole("button", { name: "退出", exact: true }).click();
       await page.getByRole("button", { name: "确认退出" }).click();
@@ -261,6 +333,108 @@ async function run() {
     await page.reload();
     await page.getByText("已登录 · Browser Smoke").first().waitFor({ state: "attached", timeout: 10000 });
     await page.getByText("积分 60").first().waitFor({ state: "attached", timeout: 10000 });
+    await page.goto(`${baseUrl}/workspace/image`, { waitUntil: "networkidle" });
+    const freeModelSelect = page.getByLabel("模型");
+    await freeModelSelect.waitFor({ timeout: 10000 });
+    if (!(await freeModelSelect.isDisabled())) fail("free users should see a disabled model dropdown");
+    const freeModelText = await freeModelSelect.locator("option:checked").textContent();
+    if (!freeModelText?.includes("Agnes Image 2.1 Flash")) fail(`free model dropdown should show the default model, received ${freeModelText || "(empty)"}`);
+    await page.getByText("购买积分后可选择更多模型").waitFor({ timeout: 10000 });
+    const purchasePromptHref = await page.getByRole("link", { name: "去购买积分" }).getAttribute("href");
+    if (purchasePromptHref !== "/workspace/billing") fail(`free model purchase prompt should link to billing, received ${purchasePromptHref}`);
+
+    const creditOrderPayload = await page.evaluate(async () => {
+      const response = await fetch("/api/orders/credits", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ planId: "credits-500" })
+      });
+      return { status: response.status, body: await response.json() };
+    });
+    if (creditOrderPayload.status !== 200) fail(`create browser credit pack order: expected HTTP 200, received ${creditOrderPayload.status}`);
+    const notifyParams = {
+      pid: epayMerchantId(),
+      out_trade_no: creditOrderPayload.body?.data?.order?.outTradeNo,
+      trade_no: `browser_${Date.now().toString(36)}`,
+      trade_status: "TRADE_SUCCESS",
+      money: "1"
+    };
+    const signedNotifyParams = { ...notifyParams, sign: signEpayParams(notifyParams), sign_type: "MD5" };
+    const notifyPayload = await page.evaluate(async params => {
+      const response = await fetch("/api/payments/epay/notify", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(params)
+      });
+      return { status: response.status, text: await response.text() };
+    }, signedNotifyParams);
+    if (notifyPayload.status !== 200 || notifyPayload.text !== "success") fail(`browser credit pack notify should succeed, received HTTP ${notifyPayload.status} ${notifyPayload.text}`);
+    await page.goto(`${baseUrl}/workspace/image`, { waitUntil: "networkidle" });
+    const paidModelSelect = page.getByLabel("模型");
+    await paidModelSelect.waitFor({ timeout: 10000 });
+    if (await paidModelSelect.isDisabled()) fail("credit pack users should see an enabled model dropdown");
+    const paidOptions = await paidModelSelect.locator("option").allTextContents();
+    if (!paidOptions.some(option => option.includes("Premium Smoke Model"))) fail(`credit pack model dropdown should include premium model, received ${paidOptions.join(" | ")}`);
+    await paidModelSelect.selectOption("premium-model");
+    await page.getByText("已保存默认生成模型").waitFor({ timeout: 10000 });
+
+    const insufficientTaskRoute = async route => {
+      if (route.request().method() !== "POST") return route.continue();
+      return route.fulfill({
+        status: 402,
+        contentType: "application/json",
+        body: JSON.stringify({ code: 402, message: "积分不足，请购买额度或等待免费额度刷新。", data: { errorCode: "INSUFFICIENT_CREDITS" } })
+      });
+    };
+    await page.route("**/api/image/tasks", insufficientTaskRoute);
+    await page.getByRole("button", { name: /生成 \d+ 张方案/ }).click();
+    await page.getByText("积分不足，请购买额度或等待免费额度刷新。").waitFor({ timeout: 10000 });
+    if (await paidModelSelect.isDisabled()) fail("insufficient credits should not disable model selection for credit pack users");
+    await page.unroute("**/api/image/tasks", insufficientTaskRoute);
+    const disabledPreferredPayload = await page.evaluate(async () => {
+      const response = await fetch("/api/admin/model-config", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "x-fluxart-admin-secret": "browser-smoke-admin-secret-valid-123"
+        },
+        body: JSON.stringify({
+          models: [{
+            id: "agnes-image-2-1-flash",
+            displayName: "Agnes Image 2.1 Flash",
+            provider: "agnes",
+            model: "agnes-image-2.1-flash",
+            baseUrl: "https://apihub.agnes-ai.com/v1",
+            apiKeySecretRef: "FLUXART_IMAGE_API_KEY",
+            executionMode: "mock",
+            requestTimeoutMs: 120000,
+            enabled: true,
+            isDefault: true
+          }, {
+            id: "premium-model",
+            displayName: "Premium Smoke Model",
+            provider: "custom",
+            model: "premium-smoke-model",
+            baseUrl: "https://provider.example.test/premium/v1",
+            apiKeySecretRef: "premium.api-key",
+            executionMode: "mock",
+            requestTimeoutMs: 660000,
+            enabled: false,
+            isDefault: false
+          }]
+        })
+      });
+      return { status: response.status, body: await response.json() };
+    });
+    if (disabledPreferredPayload.status !== 200) fail(`disable browser preferred model should return HTTP 200, received ${disabledPreferredPayload.status}`);
+    await page.goto(`${baseUrl}/workspace/image`, { waitUntil: "networkidle" });
+    const fallbackModelSelect = page.getByLabel("模型");
+    await fallbackModelSelect.waitFor({ timeout: 10000 });
+    const fallbackModelValue = await fallbackModelSelect.inputValue();
+    if (fallbackModelValue !== "agnes-image-2-1-flash") fail(`disabled preferred model should fall back to default, received ${fallbackModelValue}`);
+    const fallbackOptions = await fallbackModelSelect.locator("option").allTextContents();
+    if (fallbackOptions.some(option => option.includes("Premium Smoke Model"))) fail("disabled model should disappear from workspace options");
+    await page.getByText("原模型不可用，已切换到默认模型。").waitFor({ timeout: 10000 });
 
     await page.locator("header").getByRole("button", { name: "退出", exact: true }).click();
     await page.getByRole("button", { name: "确认退出" }).click();
@@ -272,6 +446,7 @@ async function run() {
     await page.getByLabel("密码").fill("browser-password-1");
     await page.getByRole("button", { name: "立即登录" }).click();
     await page.getByText("已登录 · Browser Smoke").first().waitFor({ state: "attached", timeout: 10000 });
+    await page.goto(`${baseUrl}/workspace/account`);
     await page.getByText("server session 已验证").waitFor({ timeout: 10000 });
     await page.getByText(`${username} · 积分充足`).waitFor({ timeout: 10000 });
     await page.getByText("积分校验").waitFor({ timeout: 10000 });

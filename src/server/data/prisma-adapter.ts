@@ -1853,6 +1853,10 @@ export function createPrismaRepositories(): AppRepositories {
           if (!orderRecord) throw new Error("ORDER_NOT_FOUND");
           const orderStatus = asString(orderRecord.fulfillmentStatus, "pending");
           if (existingNotification || orderStatus === "fulfilled") {
+            await tx.user.update?.({
+              where: { id: asString(orderRecord.userId) },
+              data: { memberStatus: "credit_pack" }
+            });
             return {
               order: {
                 id: asString(orderRecord.id),
@@ -1894,6 +1898,10 @@ export function createPrismaRepositories(): AppRepositories {
           });
           if (claimResult && claimResult.count === 0) {
             const claimedOrder = await tx.order.findUnique?.({ where: { id: input.order.id } });
+            await tx.user.update?.({
+              where: { id: asString(claimedOrder?.userId || input.order.userId) },
+              data: { memberStatus: "credit_pack" }
+            });
             return {
               order: {
                 id: asString(claimedOrder?.id || input.order.id),
@@ -1918,6 +1926,10 @@ export function createPrismaRepositories(): AppRepositories {
           await tx.paymentNotification.create({ data: input.notification });
           await tx.creditBucket.create({ data: input.bucket });
           await tx.creditLedgerEntry.create({ data: input.ledgerEntry });
+          await tx.user.update?.({
+            where: { id: input.order.userId },
+            data: { memberStatus: "credit_pack" }
+          });
           const updatedOrder = claimResult ? await tx.order.findUnique?.({ where: { id: input.order.id } }) : await tx.order.update?.({
             where: { id: input.order.id },
             data: {

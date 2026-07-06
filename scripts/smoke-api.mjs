@@ -85,6 +85,17 @@ function expect(condition, label) {
   if (!condition) fail(label);
 }
 
+function snapshotCookies() {
+  return new Map(cookieJar);
+}
+
+function restoreCookies(snapshot) {
+  cookieJar.clear();
+  for (const [name, value] of snapshot.entries()) {
+    cookieJar.set(name, value);
+  }
+}
+
 async function expectAssetDownload(assetId, label) {
   const result = await request(`/api/image/assets/${assetId}/download`);
   expectStatus(result, 200, label);
@@ -96,6 +107,29 @@ async function expectAssetDownload(assetId, label) {
 
 function daysBetween(fromMs, toIso) {
   return (Date.parse(toIso) - fromMs) / 86400000;
+}
+
+function addOneCalendarMonth(date) {
+  const targetYear = date.getUTCFullYear();
+  const targetMonth = date.getUTCMonth() + 1;
+  const targetLastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+  const result = new Date(date.getTime());
+  result.setUTCFullYear(targetYear, targetMonth, Math.min(date.getUTCDate(), targetLastDay));
+  return result;
+}
+
+function expectAboutOneCalendarMonth(startedAtMs, validUntilIso, label) {
+  const expected = addOneCalendarMonth(new Date(startedAtMs)).getTime();
+  const actual = Date.parse(validUntilIso);
+  expect(Number.isFinite(actual) && Math.abs(actual - expected) < 30000, `${label} should expire about one calendar month after grant`);
+}
+
+function expectNoServerModelConfig(task, label) {
+  const payload = task?.requestPayload || {};
+  expect(payload.modelBaseUrl === undefined, `${label} should not expose model baseUrl in task payload`);
+  expect(payload.modelApiKeySecretRef === undefined, `${label} should not expose model secret reference in task payload`);
+  expect(payload.modelExecutionMode === undefined, `${label} should not expose model execution mode in task payload`);
+  expect(payload.modelRequestTimeoutMs === undefined, `${label} should not expose model timeout in task payload`);
 }
 
 function signEpayParams(params, secret = "mock-epay-secret") {
@@ -346,6 +380,18 @@ async function runSmoke() {
       enabled: true,
       isDefault: true
     };
+    const premiumConfig = {
+      id: "premium-model",
+      displayName: "Premium Smoke Model",
+      provider: "custom",
+      model: "premium-smoke-model",
+      baseUrl: "https://provider.example.test/premium/v1",
+      apiKeySecretRef: "premium.api-key",
+      executionMode: "mock",
+      requestTimeoutMs: 660000,
+      enabled: true,
+      isDefault: false
+    };
     const savedCustom = await request("/api/admin/model-config", {
       method: "PUT",
       headers: { "x-fluxart-admin-secret": adminSecret },
@@ -362,6 +408,38 @@ async function runSmoke() {
     });
     expectStatus(testedCustom, 200, "model admin test custom config");
     expect(testedCustom.body.data.test.status === "passed", "mock model configuration tests should pass");
+
+    const noEnabled = await request("/api/admin/model-config", {
+      method: "PUT",
+      headers: { "x-fluxart-admin-secret": adminSecret },
+      body: JSON.stringify({ models: [{ ...customConfig, enabled: false }] })
+    });
+    expectStatus(noEnabled, 400, "model admin reject zero enabled models");
+    expect(noEnabled.body.data.errorCode === "MODEL_ENABLED_REQUIRED", "zero enabled models should return MODEL_ENABLED_REQUIRED");
+
+    const noDefault = await request("/api/admin/model-config", {
+      method: "PUT",
+      headers: { "x-fluxart-admin-secret": adminSecret },
+      body: JSON.stringify({ models: [{ ...customConfig, isDefault: false }] })
+    });
+    expectStatus(noDefault, 400, "model admin reject missing default model");
+    expect(noDefault.body.data.errorCode === "MODEL_DEFAULT_REQUIRED", "missing default should return MODEL_DEFAULT_REQUIRED");
+
+    const multipleDefaults = await request("/api/admin/model-config", {
+      method: "PUT",
+      headers: { "x-fluxart-admin-secret": adminSecret },
+      body: JSON.stringify({ models: [customConfig, { ...premiumConfig, isDefault: true }] })
+    });
+    expectStatus(multipleDefaults, 400, "model admin reject multiple default models");
+    expect(multipleDefaults.body.data.errorCode === "MODEL_DEFAULT_REQUIRED", "multiple defaults should return MODEL_DEFAULT_REQUIRED");
+
+    const disabledDefault = await request("/api/admin/model-config", {
+      method: "PUT",
+      headers: { "x-fluxart-admin-secret": adminSecret },
+      body: JSON.stringify({ models: [{ ...customConfig, enabled: false, isDefault: true }, { ...premiumConfig, enabled: true, isDefault: false }] })
+    });
+    expectStatus(disabledDefault, 400, "model admin reject disabled default model");
+    expect(disabledDefault.body.data.errorCode === "MODEL_DEFAULT_DISABLED", "disabled default should return MODEL_DEFAULT_DISABLED");
 
     const savedDefault = await request("/api/admin/model-config", {
       method: "PUT",
@@ -391,6 +469,27 @@ async function runSmoke() {
     expectStatus(restoredCustom, 200, "model admin restore config");
     expect(restoredCustom.body.data.configuration.model === "smoke-admin-model", "model admin should restore a previous configuration");
 
+    const savedSelectableModels = await request("/api/admin/model-config", {
+      method: "PUT",
+      headers: { "x-fluxart-admin-secret": adminSecret },
+      body: JSON.stringify({
+        models: [{
+          id: "agnes-image-2-1-flash",
+          displayName: "Agnes Image 2.1 Flash",
+          provider: "agnes",
+          model: "agnes-image-2.1-flash",
+          baseUrl: "https://apihub.agnes-ai.com/v1",
+          apiKeySecretRef: "FLUXART_IMAGE_API_KEY",
+          executionMode: "mock",
+          requestTimeoutMs: 120000,
+          enabled: true,
+          isDefault: true
+        }, premiumConfig]
+      })
+    });
+    expectStatus(savedSelectableModels, 200, "model admin save selectable model list");
+    expect(savedSelectableModels.body.data.configurations.some(model => model.id === "premium-model" && model.enabled), "model admin should save enabled non-default selectable models");
+
     if (!explicitBaseUrl) {
       const tongsrRegistration = await request("/api/auth/register", {
         method: "POST",
@@ -402,7 +501,7 @@ async function runSmoke() {
 
       const usernameAdmin = await request("/api/admin/model-config");
       expectStatus(usernameAdmin, 200, "model admin read with admin username");
-      expect(usernameAdmin.body.data.configuration.model === "smoke-admin-model", "tongsr should access model admin without an admin secret");
+      expect(usernameAdmin.body.data.configurations.some(model => model.id === "premium-model"), "tongsr should access model admin without an admin secret");
 
       const restoreDemoLogin = await request("/api/auth/login", {
         method: "POST",
@@ -410,6 +509,50 @@ async function runSmoke() {
       });
       expectStatus(restoreDemoLogin, 200, "restore demo login after admin username smoke");
     }
+  }
+
+  if (adminSecret) {
+    const demoSession = snapshotCookies();
+    const freeModelUsername = `free_model_${Date.now().toString(36)}`;
+    const freeModelRegistration = await request("/api/auth/register", {
+      method: "POST",
+      body: JSON.stringify({ username: freeModelUsername, password: "free-model-password-1", displayName: "Free Model Smoke" })
+    });
+    expectStatus(freeModelRegistration, 200, "register free model smoke account");
+
+    const freeModelSelection = await request("/api/image/models");
+    expectStatus(freeModelSelection, 200, "free model selection state");
+    expect(freeModelSelection.body.data.modelSelection.eligible === false, "free users should not be model-selection eligible");
+    expect(freeModelSelection.body.data.modelSelection.selectedImageModelId === "agnes-image-2-1-flash", "free users should see the default model selected");
+    expect(freeModelSelection.body.data.modelSelection.models.length === 1, "free users should only receive the default model option");
+
+    const freePreferred = await request("/api/account/preferred-model", {
+      method: "POST",
+      body: JSON.stringify({ modelId: "premium-model" })
+    });
+    expectStatus(freePreferred, 403, "free users cannot save preferred model");
+    expect(freePreferred.body.data.errorCode === "MODEL_SELECTION_REQUIRES_PURCHASE", "free preferred model save should require purchase");
+
+    const freeSelectedTask = await request("/api/image/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        taskType: "t2i",
+        prompt: "free user selected premium model",
+        count: 1,
+        size: "1024x1024",
+        selectedImageModelId: "premium-model",
+        modelProvider: "custom",
+        modelName: "browser-submitted-model",
+        modelBaseUrl: "https://attacker.example.test/v1",
+        modelApiKeySecretRef: "ATTACKER_SECRET"
+      })
+    });
+    expectStatus(freeSelectedTask, 200, "free selected model task");
+    expect(freeSelectedTask.body.data.task.modelProvider === "agnes", "free task creation should ignore selected models and use the default provider");
+    expect(freeSelectedTask.body.data.task.modelName === "agnes-image-2.1-flash", "free task creation should ignore selected models and use the default model");
+    expect(freeSelectedTask.body.data.task.requestPayload.selectedImageModelId === "agnes-image-2-1-flash", "free task payload should record the resolved default model id");
+    expectNoServerModelConfig(freeSelectedTask.body.data.task, "free selected model task");
+    restoreCookies(demoSession);
   }
 
   const invalidTask = await request("/api/image/tasks", {
@@ -497,12 +640,17 @@ async function runSmoke() {
   expect(me.body.data.account.username === registerUsername, "current session should resolve from cookie");
   expect((me.response.headers.get("set-cookie") || "").includes("fluxart_session="), "current session should renew the session cookie");
 
+  const creditsStartedAt = Date.now();
   const authedCredits = await request("/api/account/credits");
   expectStatus(authedCredits, 200, "authed account credits");
   expect(authedCredits.body.data.credits.userId === registered.body.data.account.userId, "account API should resolve user from server session");
   expect(authedCredits.body.data.credits.credits === 60, "balance check should include registration and lazy daily free credits");
-  expect(authedCredits.body.data.credits.groups.some(group => group.amount === 50), "new account credits should include the 50-credit registration bucket");
-  expect(authedCredits.body.data.credits.groups.some(group => group.amount === 10), "new account credits should include a lazy 10-credit daily free bucket");
+  const registrationCreditGroup = authedCredits.body.data.credits.groups.find(group => group.label.includes("注册赠送") && group.amount === 50);
+  const dailyFreeCreditGroup = authedCredits.body.data.credits.groups.find(group => group.label.includes("每日免费") && group.amount === 10);
+  expect(registrationCreditGroup, "new account credits should include the 50-credit registration bucket");
+  expect(dailyFreeCreditGroup, "new account credits should include a lazy 10-credit daily free bucket");
+  expectAboutOneCalendarMonth(registerStartedAt, registrationCreditGroup.validUntil, "registration credits");
+  expectAboutOneCalendarMonth(creditsStartedAt, dailyFreeCreditGroup.validUntil, "daily free credits");
   expect(authedCredits.body.data.credits.recentChanges.some(entry => entry.label === "Registration Credit Grant"), "new account ledger should include the registration grant");
   expect(authedCredits.body.data.credits.recentChanges.some(entry => entry.label === "Daily Free Credit Grant"), "new account ledger should include the lazy daily free grant");
   expect(!authedCredits.body.data.credits.recentChanges.some(entry => String(entry.id).includes("demo")), "new account ledger should not include demo entries");
@@ -608,6 +756,7 @@ async function runSmoke() {
   expect(creditsAfterInvalidNotifies.body.data.credits.credits === 60, "invalid Epay notifies should not grant credits");
 
   const signedNotifyParams = { ...notifyParams, sign: signEpayParams(notifyParams), sign_type: "MD5" };
+  const notifyStartedAt = Date.now();
   const notify = await request("/api/payments/epay/notify", {
     method: "POST",
     body: new URLSearchParams(signedNotifyParams),
@@ -619,7 +768,9 @@ async function runSmoke() {
   const creditsAfterPack = await request("/api/account/credits");
   expectStatus(creditsAfterPack, 200, "credits after credit pack notify");
   expect(creditsAfterPack.body.data.credits.credits === 560, "verified credit pack notify should grant purchased credits once");
-  expect(creditsAfterPack.body.data.credits.groups.some(group => group.label.includes("已购") && group.amount === 500), "credit pack notify should add a purchased credit bucket");
+  const purchasedCreditGroup = creditsAfterPack.body.data.credits.groups.find(group => group.label.includes("已购") && group.amount === 500);
+  expect(purchasedCreditGroup, "credit pack notify should add a purchased credit bucket");
+  expectAboutOneCalendarMonth(notifyStartedAt, purchasedCreditGroup.validUntil, "purchased credits");
   expect(creditsAfterPack.body.data.credits.recentChanges.some(entry => entry.label === "Purchased Credit Pack" && entry.amount === 500), "credit pack notify should write a purchased credit ledger entry");
 
   const duplicateNotify = await request("/api/payments/epay/notify", {
@@ -632,6 +783,25 @@ async function runSmoke() {
   expectStatus(creditsAfterDuplicatePack, 200, "credits after duplicate credit pack notify");
   expect(creditsAfterDuplicatePack.body.data.credits.credits === 560, "duplicate Epay notify should not duplicate purchased credit grants");
 
+  if (adminSecret) {
+    const paidModelSelection = await request("/api/image/models");
+    expectStatus(paidModelSelection, 200, "credit pack model selection state");
+    expect(paidModelSelection.body.data.modelSelection.eligible === true, "credit pack users should be model-selection eligible");
+    expect(paidModelSelection.body.data.modelSelection.models.some(model => model.id === "premium-model"), "credit pack users should receive enabled selectable models");
+
+    const savedPreferredModel = await request("/api/account/preferred-model", {
+      method: "POST",
+      body: JSON.stringify({ modelId: "premium-model" })
+    });
+    expectStatus(savedPreferredModel, 200, "save preferred image model");
+    expect(savedPreferredModel.body.data.modelSelection.preferredImageModelId === "premium-model", "preferred model save should persist the selected model id");
+    expect(savedPreferredModel.body.data.modelSelection.selectedImageModelId === "premium-model", "preferred model save should return the selected model");
+
+    const restoredPreferredModel = await request("/api/image/models");
+    expectStatus(restoredPreferredModel, 200, "restored preferred image model");
+    expect(restoredPreferredModel.body.data.modelSelection.selectedImageModelId === "premium-model", "returning credit pack users should see their preferred model selected");
+  }
+
   const authedTask = await request("/api/image/tasks", {
     method: "POST",
     body: JSON.stringify({ taskType: "t2i", prompt: "api smoke authenticated task", count: 1, size: "1024x1024" })
@@ -639,26 +809,21 @@ async function runSmoke() {
   expectStatus(authedTask, 200, "authenticated create task");
   expect(authedTask.body.data.task.userId === registered.body.data.account.userId, "workspace API should create tasks for the session user");
   expect(authedTask.body.data.task.status === "queued", "authenticated task creation should start in queued state");
-  expect(authedTask.body.data.task.priority === 10, "free user task creation should store priority 10");
+  expect(authedTask.body.data.task.priority === 50, "credit pack task creation should store priority 50");
   expect(authedTask.body.data.task.chargedCredits === 10, "t2i tasks should use the fixed V1 credit cost");
   expect(typeof authedTask.body.data.task.creditHoldId === "string", "task creation should reserve credits and attach a credit hold");
+  if (adminSecret) {
+    expect(authedTask.body.data.task.modelProvider === "custom", "task creation should use the preferred model provider for credit pack users");
+    expect(authedTask.body.data.task.modelName === "premium-smoke-model", "task creation should use the preferred model for credit pack users");
+    expect(authedTask.body.data.task.requestPayload.selectedImageModelId === "premium-model", "task creation should record the resolved preferred model id");
+  }
+  expectNoServerModelConfig(authedTask.body.data.task, "authenticated task");
 
   const creditsAfterTask = await request("/api/account/credits");
   expectStatus(creditsAfterTask, 200, "credits after authenticated task");
   expect(creditsAfterTask.body.data.credits.credits === 550, "task creation should deduct held credits from available balance");
   expect(creditsAfterTask.body.data.credits.recentChanges.some(entry => entry.label === "Generation Credit Hold" && entry.amount === -10), "task creation should write a hold ledger entry");
   expect(!creditsAfterTask.body.data.credits.recentChanges.some(entry => entry.label === "Generation Credit Spend" && entry.amount === -10), "task creation should not write spend ledger entries before approved usable output");
-
-  const overLimitTask = await request("/api/image/tasks", {
-    method: "POST",
-    body: JSON.stringify({ taskType: "t2i", prompt: "api smoke over limit task", count: 1, size: "1024x1024" })
-  });
-  expectStatus(overLimitTask, 409, "free user running task limit");
-  expect(overLimitTask.body.data.errorCode === "TASK_LIMIT_REACHED", "free users should be limited to one active task");
-
-  const creditsAfterOverLimit = await request("/api/account/credits");
-  expectStatus(creditsAfterOverLimit, 200, "credits after over-limit task");
-  expect(creditsAfterOverLimit.body.data.credits.credits === 550, "over-limit task creation should not create another hold");
 
   const ranTask = await request(`/api/image/tasks/${authedTask.body.data.task.id}`, { method: "POST" });
   expectStatus(ranTask, 200, "run authenticated task");
@@ -692,6 +857,58 @@ async function runSmoke() {
   expectStatus(creditsAfterRepeatedHdDownload, 200, "credits after repeat HD download");
   expect(creditsAfterRepeatedHdDownload.body.data.credits.credits === 545, "repeat HD download should not spend credits again");
 
+  let expectedCreditsAfterReturn = 1045;
+  if (adminSecret) {
+    const disabledPreferredConfig = {
+      id: "premium-model",
+      displayName: "Premium Smoke Model",
+      provider: "custom",
+      model: "premium-smoke-model",
+      baseUrl: "https://provider.example.test/premium/v1",
+      apiKeySecretRef: "premium.api-key",
+      executionMode: "mock",
+      requestTimeoutMs: 660000,
+      enabled: false,
+      isDefault: false
+    };
+    const disabledPreferredSave = await request("/api/admin/model-config", {
+      method: "PUT",
+      headers: { "x-fluxart-admin-secret": adminSecret },
+      body: JSON.stringify({
+        models: [{
+          id: "agnes-image-2-1-flash",
+          displayName: "Agnes Image 2.1 Flash",
+          provider: "agnes",
+          model: "agnes-image-2.1-flash",
+          baseUrl: "https://apihub.agnes-ai.com/v1",
+          apiKeySecretRef: "FLUXART_IMAGE_API_KEY",
+          executionMode: "mock",
+          requestTimeoutMs: 120000,
+          enabled: true,
+          isDefault: true
+        }, disabledPreferredConfig]
+      })
+    });
+    expectStatus(disabledPreferredSave, 200, "disable preferred model");
+
+    const disabledPreferredState = await request("/api/image/models");
+    expectStatus(disabledPreferredState, 200, "disabled preferred model state");
+    expect(disabledPreferredState.body.data.modelSelection.selectedImageModelId === "agnes-image-2-1-flash", "disabled preferred model should fall back to the default model");
+    expect(disabledPreferredState.body.data.modelSelection.fallbackReason === "unavailable_preference", "disabled preferred model should explain unavailable preference fallback");
+    expect(!disabledPreferredState.body.data.modelSelection.models.some(model => model.id === "premium-model"), "disabled models should not appear in user-facing model choices");
+
+    const fallbackModelTask = await request("/api/image/tasks", {
+      method: "POST",
+      body: JSON.stringify({ taskType: "t2i", prompt: "api smoke disabled preferred fallback", count: 1, size: "1024x1024" })
+    });
+    expectStatus(fallbackModelTask, 200, "disabled preferred fallback task");
+    expect(fallbackModelTask.body.data.task.modelProvider === "agnes", "disabled preferred fallback task should use the default provider");
+    expect(fallbackModelTask.body.data.task.modelName === "agnes-image-2.1-flash", "disabled preferred fallback task should use the default model");
+    expect(fallbackModelTask.body.data.task.requestPayload.modelSelectionFallbackReason === "unavailable_preference", "disabled preferred fallback task should record the fallback reason");
+    expectNoServerModelConfig(fallbackModelTask.body.data.task, "disabled preferred fallback task");
+    expectedCreditsAfterReturn = 1035;
+  }
+
   const returnOrder = await request("/api/orders/credits", {
     method: "POST",
     body: JSON.stringify({ planId: "credits-500" })
@@ -712,7 +929,7 @@ async function runSmoke() {
   expect(returnResult.response.headers.get("location")?.includes("/workspace/billing?payment=success"), "signed payment return should redirect with success state");
   const creditsAfterReturn = await request("/api/account/credits");
   expectStatus(creditsAfterReturn, 200, "credits after payment return");
-  expect(creditsAfterReturn.body.data.credits.credits === 1045, "signed payment return should fulfill the credit pack once");
+  expect(creditsAfterReturn.body.data.credits.credits === expectedCreditsAfterReturn, "signed payment return should fulfill the credit pack once");
 
   const uploadedSourceTask = await request("/api/image/tasks", {
     method: "POST",

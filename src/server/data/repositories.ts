@@ -960,13 +960,16 @@ export function createMockRepositories(store: AppDataStore = createMockDataStore
         const existingNotification = store.paymentNotifications.find(notification => notification.orderId === input.order.id);
         const order = store.orders.find(item => item.id === input.order.id);
         if (!order) throw new Error("ORDER_NOT_FOUND");
+        const user = store.users.find(item => item.id === order.userId);
         if (existingNotification || order.fulfillmentStatus === "fulfilled") {
+          if (user) user.memberStatus = "credit_pack";
           return { order, notification: existingNotification || input.notification, duplicated: true };
         }
 
         store.paymentNotifications.push(input.notification);
         store.creditBuckets.push(input.bucket);
         store.ledgerEntries.push(input.ledgerEntry);
+        if (user) user.memberStatus = "credit_pack";
         Object.assign(order, {
           status: "paid" as const,
           fulfillmentStatus: "fulfilled" as const,

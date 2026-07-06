@@ -20,6 +20,15 @@ function id(prefix: string) {
   return `${prefix}-${randomUUID()}`;
 }
 
+function addOneCalendarMonth(date: Date) {
+  const targetYear = date.getUTCFullYear();
+  const targetMonth = date.getUTCMonth() + 1;
+  const targetLastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+  const result = new Date(date.getTime());
+  result.setUTCFullYear(targetYear, targetMonth, Math.min(date.getUTCDate(), targetLastDay));
+  return result;
+}
+
 function comparable(value: unknown) {
   return value instanceof Date ? value.toISOString() : String(value || "");
 }
@@ -140,6 +149,12 @@ async function run() {
   const { storeGeneratedAsset } = await import("../src/server/image/storage/upload-service");
   const { submitImageGeneration } = await import("../src/server/image/ai/image-model-adapter");
   const { TaskCapabilityError, TaskConcurrencyError } = await import("../src/server/image/business/task-policy");
+  const { creditValidUntilIso } = await import("../src/server/credits/credit-validity");
+
+  expect(
+    creditValidUntilIso(new Date("2026-01-31T12:34:56.000Z")) === "2026-02-28T12:34:56.000Z",
+    "credit validity should add one calendar month and clamp end-of-month dates"
+  );
   const userId = "usr-smoke";
   const now = new Date("2026-06-24T00:00:00.000Z");
   const delegates = {
@@ -524,7 +539,7 @@ async function run() {
   expect(lowBalanceCredits.recentChanges.some(entry => entry.label === "Daily Free Credit Grant"), "credit service should record a daily free grant ledger entry");
   const dailyGrantBucket = lowBalanceStore.creditBuckets.find(bucket => bucket.sourceType === "daily_free");
   expect(
-    dailyGrantBucket?.validUntil && Math.round((Date.parse(dailyGrantBucket.validUntil) - Date.parse(dailyGrantBucket.validFrom)) / 86400000) === 30,
+    dailyGrantBucket?.validUntil && dailyGrantBucket.validUntil === addOneCalendarMonth(new Date(dailyGrantBucket.validFrom)).toISOString(),
     "daily free credits should use a one-month validity window"
   );
   const cappedDailyStore = createMockDataStore();
