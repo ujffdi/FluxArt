@@ -489,3 +489,40 @@ model AssetCleanupJob {
 
   @@map("asset_cleanup_jobs")
 }
+
+model ActiveImageModelConfiguration {
+  id                String                     @id @db.VarChar(64)
+  provider          String                     @db.VarChar(64)
+  modelName         String                     @map("model_name") @db.VarChar(120)
+  baseUrl           String                     @map("base_url") @db.VarChar(512)
+  apiKeySecretRef   String                     @map("api_key_secret_ref") @db.VarChar(128)
+  executionMode     String                     @map("execution_mode") @db.VarChar(16)
+  requestTimeoutMs  Int                        @map("request_timeout_ms")
+  lastTestStatus    String                     @default("untested") @map("last_test_status") @db.VarChar(16)
+  lastTestedAt      DateTime?                  @map("last_tested_at")
+  lastTestError     String?                    @map("last_test_error") @db.VarChar(512)
+  updatedByUserId   String?                    @map("updated_by_user_id") @db.VarChar(191)
+  createdAt         DateTime                   @default(now()) @map("created_at")
+  updatedAt         DateTime                   @updatedAt @map("updated_at")
+  changes           ModelConfigurationChange[]
+
+  @@map("active_image_model_configurations")
+}
+
+model ModelConfigurationChange {
+  id                    String                        @id @default(cuid()) @db.VarChar(191)
+  activeConfigurationId String                        @default("active") @map("active_configuration_id") @db.VarChar(64)
+  changedByUserId       String                        @map("changed_by_user_id") @db.VarChar(191)
+  changeType            String                        @map("change_type") @db.VarChar(16)
+  beforeConfigJson      Json?                         @map("before_config_json")
+  afterConfigJson       Json                          @map("after_config_json")
+  testStatus            String                        @default("untested") @map("test_status") @db.VarChar(16)
+  testError             String?                       @map("test_error") @db.VarChar(512)
+  restoredFromChangeId  String?                       @map("restored_from_change_id") @db.VarChar(191)
+  createdAt             DateTime                      @default(now()) @map("created_at")
+  activeConfiguration   ActiveImageModelConfiguration @relation(fields: [activeConfigurationId], references: [id])
+
+  @@index([activeConfigurationId, createdAt])
+  @@index([createdAt])
+  @@map("model_configuration_changes")
+}

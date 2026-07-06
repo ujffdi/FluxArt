@@ -1,6 +1,6 @@
 import sharp from "sharp";
 import type { CreateImageTaskInput } from "@/types/image";
-import { getImageModelConfig } from "./model-config";
+import { getImageModelConfig, type ImageModelConfig } from "./model-config";
 
 export interface ImageModelGenerationInput extends CreateImageTaskInput {
   sourceImageUrl?: string;
@@ -26,7 +26,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function requestTimeoutMs() {
+function requestTimeoutMs(config?: Pick<ImageModelConfig, "requestTimeoutMs">) {
+  if (config?.requestTimeoutMs && Number.isFinite(config.requestTimeoutMs) && config.requestTimeoutMs > 0) {
+    return config.requestTimeoutMs;
+  }
   const configured = Number(process.env.IMAGE_MODEL_REQUEST_TIMEOUT_MS);
   return Number.isFinite(configured) && configured > 0 ? configured : 120000;
 }
@@ -82,8 +85,7 @@ function buildLiveGenerationBody(input: ImageModelGenerationInput, modelName: st
   return body;
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, label: string) {
-  const timeoutMs = requestTimeoutMs();
+async function fetchWithTimeout(url: string, init: RequestInit, label: string, timeoutMs = requestTimeoutMs()) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -143,9 +145,10 @@ async function outputBytesFromPayload(payload: unknown, provider: string) {
 }
 
 export async function submitImageGeneration(input: ImageModelGenerationInput): Promise<ModelSubmission> {
-  const config = getImageModelConfig();
+  const config = await getImageModelConfig();
   const provider = config.provider;
   const modelName = config.model;
+  const timeoutMs = requestTimeoutMs(config);
 
   if (config.executionMode === "live") {
     const apiKey = process.env[config.apiKeySecretRef || "FLUXART_IMAGE_API_KEY"];
@@ -160,7 +163,7 @@ export async function submitImageGeneration(input: ImageModelGenerationInput): P
         Authorization: `Bearer ${apiKey}`
       },
       body: JSON.stringify(buildLiveGenerationBody(input, modelName, provider))
-    }, `${provider} image generation`);
+    }, `${provider} image generation`, timeoutMs);
 
     if (!response.ok) {
       throw new Error(`${provider} image generation failed: ${response.status} ${await response.text()}`);
@@ -197,9 +200,10 @@ export async function submitImageGeneration(input: ImageModelGenerationInput): P
 }
 
 export async function pollImageGenerationResult(input: AsyncPollInput): Promise<ModelSubmission> {
-  const config = getImageModelConfig();
+  const config = await getImageModelConfig();
   const provider = config.provider;
   const modelName = config.model;
+  const timeoutMs = requestTimeoutMs(config);
 
   if (config.executionMode !== "live") {
     return {
@@ -225,7 +229,7 @@ export async function pollImageGenerationResult(input: AsyncPollInput): Promise<
     headers: {
       Authorization: `Bearer ${apiKey}`
     }
-  }, `${provider} async image result`);
+  }, `${provider} async image result`, timeoutMs);
 
   if (!response.ok) {
     throw new Error(`${provider} async image result failed: ${response.status} ${await response.text()}`);

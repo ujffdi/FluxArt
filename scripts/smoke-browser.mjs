@@ -247,7 +247,9 @@ async function run() {
     if (uploadedAsset?.origin !== "uploaded") fail("browser smoke uploaded asset should have uploaded origin");
     await page.goto(`${baseUrl}/workspace/image/assets`);
     await page.getByText("browser-upload").first().waitFor({ timeout: 10000 });
+    const uploadedFilterResponse = page.waitForResponse(response => response.url().includes("/api/image/assets") && response.url().includes("origin=uploaded") && response.status() === 200);
     await page.getByLabel("资产来源筛选").selectOption("uploaded");
+    await uploadedFilterResponse;
     await page.getByText(uploadedAsset.id).first().waitFor({ timeout: 10000 });
     await page.getByText(`${uploadedAsset.id} · 用户上传`, { exact: false }).first().waitFor({ timeout: 10000 });
     await page.getByText(uploadedAsset.id).first().click();
@@ -280,8 +282,11 @@ async function run() {
     if (!generatedAsset) fail("browser smoke generated asset should appear in the asset list");
 
     await page.goto(`${baseUrl}/workspace/image`);
-    await page.getByText(generatedAsset.id).waitFor({ timeout: 10000 });
-    await page.getByText("已保存到资产中心").waitFor({ timeout: 10000 });
+    await page.getByText(taskId).waitFor({ timeout: 10000 });
+    await page.getByText("已生成 1 个结果，可在资产中心查看。").first().waitFor({ timeout: 10000 });
+    await page.goto(`${baseUrl}/workspace/image/assets`);
+    await page.getByText(generatedAsset.id).first().waitFor({ timeout: 10000 });
+    await page.getByText(generatedAsset.id).first().click();
     await page.getByRole("button", { name: "下载" }).first().click();
     await page.getByText("积分解锁确认").waitFor({ timeout: 10000 });
     const downloadPromise = page.waitForEvent("download");
@@ -312,8 +317,8 @@ async function run() {
     if (!imageToImageAssetId) fail("run browser smoke image-to-image task: missing generated asset id");
 
     await page.goto(`${baseUrl}/workspace/image`);
-    await page.getByText(imageToImageAssetId).waitFor({ timeout: 10000 });
-    await page.getByText("图生图 · succeeded").waitFor({ timeout: 10000 });
+    await page.getByText(imageToImageTaskId).waitFor({ timeout: 10000 });
+    await page.getByText("已生成 1 个结果，可在资产中心查看。").first().waitFor({ timeout: 10000 });
 
     await page.goto(`${baseUrl}/workspace/image/assets`);
     await page.getByRole("button", { name: "删除" }).waitFor({ timeout: 10000 });

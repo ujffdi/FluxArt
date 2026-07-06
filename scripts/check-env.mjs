@@ -71,6 +71,7 @@ function run() {
   const mapayNotifyUrl = process.env.MAPAY_NOTIFY_URL || process.env.EPAY_NOTIFY_URL;
   const mapayReturnUrl = process.env.MAPAY_RETURN_URL || process.env.EPAY_RETURN_URL;
   const sessionSecret = process.env.FLUXART_SESSION_SECRET;
+  const adminSecret = process.env.FLUXART_ADMIN_SECRET;
   const testToolsEnabled = process.env.FLUXART_ENABLE_TEST_TOOLS === "1";
   const testToolsSecret = process.env.FLUXART_TEST_TOOLS_SECRET;
   const testToolsMaxCreditDelta = process.env.FLUXART_TEST_TOOLS_MAX_CREDIT_DELTA;
@@ -98,6 +99,7 @@ function run() {
   requireWhenProduction(process.env.MINIO_SECRET_KEY, "MINIO_SECRET_KEY", dataMode);
   requireWhenProduction(minioPublicBaseUrl, "MINIO_PUBLIC_BASE_URL", dataMode);
   requireWhenProduction(sessionSecret, "FLUXART_SESSION_SECRET", dataMode);
+  requireWhenProduction(adminSecret, "FLUXART_ADMIN_SECRET", dataMode);
   requireWhenProduction(mapayApiUrl, "MAPAY_API_URL", dataMode);
   requireWhenProduction(mapayMerchantId, "MAPAY_MERCHANT_ID", dataMode);
   requireWhenProduction(mapaySigningSecret, "MAPAY_SIGNING_SECRET", dataMode);
@@ -111,6 +113,7 @@ function run() {
   validateUrl(mapayNotifyUrl, "MAPAY_NOTIFY_URL");
   validateUrl(mapayReturnUrl, "MAPAY_RETURN_URL");
   validateSecret(sessionSecret, "FLUXART_SESSION_SECRET", { minLength: 32 });
+  validateSecret(adminSecret, "FLUXART_ADMIN_SECRET", { minLength: 24 });
   validateSecret(process.env.MINIO_SECRET_KEY, "MINIO_SECRET_KEY", { minLength: 16 });
   validateSecret(mapaySigningSecret, "MAPAY_SIGNING_SECRET", { minLength: 16 });
   validateSecret(testToolsSecret, "FLUXART_TEST_TOOLS_SECRET", { minLength: 24 });
@@ -150,6 +153,7 @@ function run() {
   if (!minioEndpoint) warn("MINIO_ENDPOINT is not set; asset storage remains in local mock mode");
   if (!mapayApiUrl) warn("MAPAY_API_URL is not set; payment adapter remains in local mock mode");
   if (!sessionSecret) warn("FLUXART_SESSION_SECRET is not set; local session hashes use a development-only fallback");
+  if (!adminSecret) warn("FLUXART_ADMIN_SECRET is not set; model administration APIs remain locked");
 
   ok(`data=${dataMode || "mock"} execution=${executionMode || "mock"} provider=${provider} model=${model} baseUrl=${baseUrl} keyRef=${apiKeySecretRef}`);
 }

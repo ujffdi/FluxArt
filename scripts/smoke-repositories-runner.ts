@@ -156,7 +156,9 @@ async function run() {
     imageAsset: makeDelegate([]),
     assetVersionNode: makeDelegate([]),
     downloadEvent: makeDelegate([]),
-    assetCleanupJob: makeDelegate([])
+    assetCleanupJob: makeDelegate([]),
+    activeImageModelConfiguration: makeDelegate([]),
+    modelConfigurationChange: makeDelegate([])
   };
   const prismaClient = {
     ...delegates,
@@ -170,6 +172,24 @@ async function run() {
 
   const account = await repositories.account.getCurrentAccount(userId);
   expect(account.credits === 50, "Prisma adapter should read account credit balance");
+
+  const savedModelConfig = await repositories.modelConfig.saveActiveConfiguration({
+    config: {
+      provider: "custom",
+      model: "runtime-model",
+      baseUrl: "https://provider.example.test/v1",
+      apiKeySecretRef: "RUNTIME_PROVIDER_KEY",
+      executionMode: "live",
+      requestTimeoutMs: 660000
+    },
+    changedByUserId: userId,
+    changeType: "save"
+  });
+  expect(savedModelConfig.configuration.model === "runtime-model", "Prisma adapter should save the active image model configuration");
+  expect(savedModelConfig.change.afterConfig.model === "runtime-model", "Prisma adapter should audit model configuration saves");
+  expect((await repositories.modelConfig.listConfigurationChanges(5)).length === 1, "Prisma adapter should list model configuration changes");
+  const activeModelConfig = await repositories.modelConfig.getActiveConfiguration();
+  expect(activeModelConfig?.requestTimeoutMs === 660000, "Prisma adapter should read the active image model configuration");
 
   const registration = await repositories.auth.createRegistration({
     user: { username: "registered", displayName: "Registered User", memberStatus: "free" },
@@ -362,6 +382,30 @@ async function run() {
   expect(cappedDailyCredits.credits === 30, "daily free credits should cap at 30 active credits");
   expect(cappedDailyStore.creditBuckets.length === 3, "daily free cap should avoid creating an extra bucket");
   setRepositoriesForTesting(undefined);
+
+  const configuredModelStore = createMockDataStore();
+  configuredModelStore.activeImageModelConfiguration = {
+    id: "active",
+    provider: "custom",
+    model: "runtime-task-model",
+    baseUrl: "https://provider.example.test/v1",
+    apiKeySecretRef: "RUNTIME_PROVIDER_KEY",
+    executionMode: "mock",
+    requestTimeoutMs: 660000,
+    lastTestStatus: "untested",
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString()
+  };
+  configuredModelStore.creditBuckets[0].remainingAmount = 100;
+  configuredModelStore.creditBuckets[0].originalAmount = 100;
+  configuredModelStore.tasks = [];
+  configuredModelStore.creditHolds = [];
+  configuredModelStore.ledgerEntries = [];
+  setRepositoriesForTesting(createMockRepositories(configuredModelStore));
+  const configuredTask = await createTask({ taskType: "t2i", prompt: "configured model", count: 1, size: "1024x1024" }, configuredModelStore.users[0].id);
+  expect(configuredTask.modelProvider === "custom" && configuredTask.modelName === "runtime-task-model", "task creation should snapshot the active image model configuration");
+  setRepositoriesForTesting(undefined);
+
   setRepositoriesForTesting(createMockRepositories(lowBalanceStore));
   try {
     await createTask({ taskType: "t2i", prompt: "too expensive", count: 4, size: "1024x1024" }, lowBalanceStore.users[0].id);

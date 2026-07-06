@@ -16,6 +16,7 @@ const productionEnv = {
   FLUXART_DATA_MODE: "prisma",
   DATABASE_URL: "mysql://fluxart:strong-password@db.example.com:3306/fluxart",
   FLUXART_SESSION_SECRET: "0123456789abcdef0123456789abcdef",
+  FLUXART_ADMIN_SECRET: "admin-secret-valid-for-env-smoke",
   MINIO_ENDPOINT: "https://minio.example.com",
   MINIO_PUBLIC_BASE_URL: "https://cdn.example.com/fluxart",
   MINIO_BUCKET: "fluxart-assets",
@@ -39,6 +40,9 @@ expect(production.status === 0, `production env should pass: ${production.stderr
 
 const missingSessionSecret = runCheck({ ...productionEnv, FLUXART_SESSION_SECRET: "" });
 expect(missingSessionSecret.status !== 0 && missingSessionSecret.stderr.includes("FLUXART_SESSION_SECRET"), "missing session secret should fail production env validation");
+
+const missingAdminSecret = runCheck({ ...productionEnv, FLUXART_ADMIN_SECRET: "" });
+expect(missingAdminSecret.status !== 0 && missingAdminSecret.stderr.includes("FLUXART_ADMIN_SECRET"), "missing admin secret should fail production env validation");
 
 const placeholderMapaySecret = runCheck({ ...productionEnv, MAPAY_SIGNING_SECRET: "secret" });
 expect(placeholderMapaySecret.status !== 0 && placeholderMapaySecret.stderr.includes("MAPAY_SIGNING_SECRET"), "placeholder MaPay secret should fail env validation");

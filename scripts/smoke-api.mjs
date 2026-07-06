@@ -7,6 +7,7 @@ import sharp from "sharp";
 const explicitBaseUrl = process.env.SMOKE_BASE_URL;
 const port = process.env.SMOKE_PORT || "3117";
 const baseUrl = explicitBaseUrl || `http://127.0.0.1:${port}`;
+const adminSecret = process.env.FLUXART_ADMIN_SECRET || (explicitBaseUrl ? "" : "smoke-admin-secret-valid-123");
 const nextBin = "./node_modules/.bin/next";
 const buildMarker = ".next/BUILD_ID";
 const mockPaymentEnv = {
@@ -165,7 +166,8 @@ function startServerIfNeeded() {
       ...process.env,
       ...mockPaymentEnv,
       FLUXART_DATA_MODE: process.env.FLUXART_DATA_MODE || "mock",
-      IMAGE_MODEL_EXECUTION: "mock"
+      IMAGE_MODEL_EXECUTION: "mock",
+      FLUXART_ADMIN_SECRET: adminSecret
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -195,6 +197,16 @@ async function runSmoke() {
   const anonymousAssets = await request("/api/image/assets");
   expectStatus(anonymousAssets, 401, "anonymous list assets");
   expect(anonymousAssets.body.data.errorCode === "AUTH_REQUIRED", "anonymous workspace API should require a server session");
+
+  if (adminSecret) {
+    const anonymousAdmin = await request("/api/admin/model-config", {
+      headers: { "x-fluxart-admin-secret": adminSecret }
+    });
+    expectStatus(anonymousAdmin, 401, "anonymous model admin");
+    expect(anonymousAdmin.body.data.errorCode === "AUTH_REQUIRED", "model admin should require a user session");
+  } else {
+    log("skipping model admin API checks; FLUXART_ADMIN_SECRET is not available for the target server");
+  }
 
   const testToolsRejected = await request("/api/dev/credits", {
     method: "POST",
@@ -308,6 +320,68 @@ async function runSmoke() {
   expect(createdTask.body.data.task.status === "queued", "created tasks should start in queued state");
   expect(createdTask.body.data.task.priority === 100, "pro trial task creation should store priority 100");
   expect(typeof createdTask.body.data.task.creditHoldId === "string", "created tasks should include a credit hold id");
+
+  if (adminSecret) {
+    const lockedAdmin = await request("/api/admin/model-config");
+    expectStatus(lockedAdmin, 403, "model admin missing secret");
+    expect(lockedAdmin.body.data.errorCode === "ADMIN_SECRET_INVALID", "model admin should reject missing admin secret");
+
+    const modelAdmin = await request("/api/admin/model-config", {
+      headers: { "x-fluxart-admin-secret": adminSecret }
+    });
+    expectStatus(modelAdmin, 200, "model admin read");
+    expect(modelAdmin.body.data.configuration.model === "agnes-image-2.1-flash", "model admin should expose the active model configuration");
+    expect(modelAdmin.body.data.presets.length >= 3, "model admin should expose preset choices");
+
+    const customConfig = {
+      provider: "custom",
+      model: "smoke-admin-model",
+      baseUrl: "https://provider.example.test/v1",
+      apiKeySecretRef: "SMOKE_PROVIDER_KEY",
+      executionMode: "mock",
+      requestTimeoutMs: 660000
+    };
+    const savedCustom = await request("/api/admin/model-config", {
+      method: "PUT",
+      headers: { "x-fluxart-admin-secret": adminSecret },
+      body: JSON.stringify({ config: customConfig })
+    });
+    expectStatus(savedCustom, 200, "model admin save custom config");
+    expect(savedCustom.body.data.configuration.model === "smoke-admin-model", "model admin should save custom model configuration");
+    const customChangeId = savedCustom.body.data.change.id;
+
+    const testedCustom = await request("/api/admin/model-config/test", {
+      method: "POST",
+      headers: { "x-fluxart-admin-secret": adminSecret },
+      body: JSON.stringify({ config: customConfig })
+    });
+    expectStatus(testedCustom, 200, "model admin test custom config");
+    expect(testedCustom.body.data.test.status === "passed", "mock model configuration tests should pass");
+
+    const savedDefault = await request("/api/admin/model-config", {
+      method: "PUT",
+      headers: { "x-fluxart-admin-secret": adminSecret },
+      body: JSON.stringify({
+        config: {
+          provider: "agnes",
+          model: "agnes-image-2.1-flash",
+          baseUrl: "https://apihub.agnes-ai.com/v1",
+          apiKeySecretRef: "FLUXART_IMAGE_API_KEY",
+          executionMode: "mock",
+          requestTimeoutMs: 120000
+        }
+      })
+    });
+    expectStatus(savedDefault, 200, "model admin save default config");
+
+    const restoredCustom = await request("/api/admin/model-config/restore", {
+      method: "POST",
+      headers: { "x-fluxart-admin-secret": adminSecret },
+      body: JSON.stringify({ changeId: customChangeId })
+    });
+    expectStatus(restoredCustom, 200, "model admin restore config");
+    expect(restoredCustom.body.data.configuration.model === "smoke-admin-model", "model admin should restore a previous configuration");
+  }
 
   const invalidTask = await request("/api/image/tasks", {
     method: "POST",

@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 const requiredModels = [
@@ -21,7 +21,9 @@ const requiredModels = [
   "ImageAsset",
   "AssetVersionNode",
   "DownloadEvent",
-  "AssetCleanupJob"
+  "AssetCleanupJob",
+  "ActiveImageModelConfiguration",
+  "ModelConfigurationChange"
 ];
 
 const requiredTables = [
@@ -44,7 +46,9 @@ const requiredTables = [
   "image_assets",
   "asset_version_nodes",
   "download_events",
-  "asset_cleanup_jobs"
+  "asset_cleanup_jobs",
+  "active_image_model_configurations",
+  "model_configuration_changes"
 ];
 
 function log(message) {
@@ -61,6 +65,15 @@ function expect(condition, message) {
 
 function expectSourceContains(source, snippet, message) {
   expect(source.includes(snippet), message);
+}
+
+function readMigrationSql() {
+  return readdirSync("prisma/migrations", { withFileTypes: true })
+    .filter(entry => entry.isDirectory())
+    .map(entry => `prisma/migrations/${entry.name}/migration.sql`)
+    .sort()
+    .map(file => readFileSync(file, "utf8"))
+    .join("\n");
 }
 
 const repositoryCookies = new Map();
@@ -117,7 +130,7 @@ async function smokeApiRepositoryFlow(baseUrl) {
 
 async function run() {
   const schema = readFileSync("prisma/schema.prisma", "utf8");
-  const migration = readFileSync("prisma/migrations/20260624000000_production_v1_init/migration.sql", "utf8");
+  const migration = readMigrationSql();
   const adapter = readFileSync("src/server/data/prisma-adapter.ts", "utf8");
 
   for (const model of requiredModels) {
@@ -161,7 +174,12 @@ async function run() {
     ["tx.creditBucket.create", "Prisma credit pack fulfillment should create purchased buckets in a transaction"],
     ["tx.creditLedgerEntry.create", "Prisma credit pack fulfillment should create ledger grants in a transaction"],
     ["fulfillMembershipOrder", "Prisma adapter should expose transactional membership fulfillment"],
-    ["tx.membershipCycle.create", "Prisma membership fulfillment should create cycles in a transaction"]
+    ["tx.membershipCycle.create", "Prisma membership fulfillment should create cycles in a transaction"],
+    ["prisma.activeImageModelConfiguration.findUnique", "Prisma adapter should read the active image model configuration"],
+    ["tx.activeImageModelConfiguration.create", "Prisma adapter should create the active image model configuration"],
+    ["tx.activeImageModelConfiguration.update", "Prisma adapter should update the active image model configuration"],
+    ["tx.modelConfigurationChange.create", "Prisma adapter should create model configuration change records"],
+    ["prisma.modelConfigurationChange.findMany", "Prisma adapter should list model configuration change records"]
   ];
 
   for (const [snippet, message] of adapterSnippets) {

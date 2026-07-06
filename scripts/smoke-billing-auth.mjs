@@ -111,7 +111,7 @@ async function run() {
     await normalPage.goto(`${baseUrl}/workspace/billing`, { waitUntil: "domcontentloaded" });
     await registerInBrowser(normalPage, "Billing Smoke");
     await normalPage.reload({ waitUntil: "networkidle" });
-    await normalPage.getByText("已登录 · Billing Smoke").waitFor({ timeout: 10000 });
+    await normalPage.getByText("已登录 · Billing Smoke").first().waitFor({ state: "attached", timeout: 10000 });
     await assertCreditPackClickDoesNotOpenLogin(normalPage);
 
     await context.route("**/api/auth/me", async route => {

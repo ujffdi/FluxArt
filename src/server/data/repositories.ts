@@ -3,8 +3,10 @@ import { account, assets, tasks, versionNodes } from "@/features/flux-art/data/d
 import { billingPlans } from "@/server/billing/plans";
 import type { BillingOrder, BillingPlanId } from "@/types/billing";
 import type { AccountEntitlement, AssetVersionNode, ImageAsset, ImageGenerationTask } from "@/types/image";
+import type { EditableImageModelConfiguration, ModelConfigurationChangeType, ModelConfigurationTestStatus } from "@/types/model-config";
 import { createPrismaRepositories } from "./prisma-adapter";
 import type {
+  ActiveImageModelConfigurationRecord,
   AssetCleanupJobRecord,
   AppDataStore,
   CreditBucketRecord,
@@ -15,6 +17,7 @@ import type {
   DownloadEventRecord,
   ImageUploadRecord,
   MembershipCycleRecord,
+  ModelConfigurationChangeRecord,
   OrderRecord,
   PaymentNotificationRecord,
   ProviderResultRecord,
@@ -128,6 +131,23 @@ export interface BillingRepository {
   listDownloadEvents: (userId: string, options?: { from?: string; downloadType?: DownloadEventRecord["downloadType"] }) => Promise<DownloadEventRecord[]>;
 }
 
+export interface SaveActiveModelConfigurationInput {
+  config: EditableImageModelConfiguration;
+  changedByUserId: string;
+  changeType: ModelConfigurationChangeType;
+  restoredFromChangeId?: string;
+  testStatus?: ModelConfigurationTestStatus;
+  testError?: string;
+}
+
+export interface ModelConfigRepository {
+  getActiveConfiguration: () => Promise<ActiveImageModelConfigurationRecord | undefined>;
+  saveActiveConfiguration: (input: SaveActiveModelConfigurationInput) => Promise<{ configuration: ActiveImageModelConfigurationRecord; change: ModelConfigurationChangeRecord }>;
+  updateActiveConfigurationTestResult: (input: { testStatus: Exclude<ModelConfigurationTestStatus, "untested">; testedAt: string; testError?: string; updatedByUserId?: string }) => Promise<ActiveImageModelConfigurationRecord | undefined>;
+  listConfigurationChanges: (limit?: number) => Promise<ModelConfigurationChangeRecord[]>;
+  getConfigurationChange: (changeId: string) => Promise<ModelConfigurationChangeRecord | undefined>;
+}
+
 export interface CreateOrderRecordInput {
   planId: BillingPlanId;
   userId: string;
@@ -141,6 +161,7 @@ export interface AppRepositories {
   auth: AuthRepository;
   credits: CreditRepository;
   billing: BillingRepository;
+  modelConfig: ModelConfigRepository;
 }
 
 function nowIso() {
@@ -271,7 +292,20 @@ export function createMockDataStore(): AppDataStore {
     providerResults: [],
     assets: [...assets],
     downloads: [],
-    cleanupJobs: []
+    cleanupJobs: [],
+    activeImageModelConfiguration: undefined,
+    modelConfigurationChanges: []
+  };
+}
+
+function editableConfigFromActive(config: ActiveImageModelConfigurationRecord): EditableImageModelConfiguration {
+  return {
+    provider: config.provider,
+    model: config.model,
+    baseUrl: config.baseUrl,
+    apiKeySecretRef: config.apiKeySecretRef,
+    executionMode: config.executionMode,
+    requestTimeoutMs: config.requestTimeoutMs
   };
 }
 
@@ -974,6 +1008,56 @@ export function createMockRepositories(store: AppDataStore = createMockDataStore
           if (options.downloadType && event.downloadType !== options.downloadType) return false;
           return true;
         }));
+      }
+    },
+    modelConfig: {
+      async getActiveConfiguration() {
+        return store.activeImageModelConfiguration;
+      },
+      async saveActiveConfiguration(input) {
+        const now = nowIso();
+        const beforeConfig = store.activeImageModelConfiguration
+          ? editableConfigFromActive(store.activeImageModelConfiguration)
+          : undefined;
+        const configuration: ActiveImageModelConfigurationRecord = {
+          id: "active",
+          ...input.config,
+          lastTestStatus: input.testStatus || "untested",
+          lastTestError: input.testError,
+          updatedByUserId: input.changedByUserId,
+          createdAt: store.activeImageModelConfiguration?.createdAt || now,
+          updatedAt: now
+        };
+        store.activeImageModelConfiguration = configuration;
+
+        const change: ModelConfigurationChangeRecord = {
+          id: id("model-change"),
+          changedByUserId: input.changedByUserId,
+          changeType: input.changeType,
+          beforeConfig,
+          afterConfig: input.config,
+          testStatus: input.testStatus || "untested",
+          testError: input.testError,
+          restoredFromChangeId: input.restoredFromChangeId,
+          createdAt: now
+        };
+        store.modelConfigurationChanges.unshift(change);
+        return { configuration, change };
+      },
+      async updateActiveConfigurationTestResult(input) {
+        if (!store.activeImageModelConfiguration) return undefined;
+        store.activeImageModelConfiguration.lastTestStatus = input.testStatus;
+        store.activeImageModelConfiguration.lastTestedAt = input.testedAt;
+        store.activeImageModelConfiguration.lastTestError = input.testError;
+        store.activeImageModelConfiguration.updatedByUserId = input.updatedByUserId || store.activeImageModelConfiguration.updatedByUserId;
+        store.activeImageModelConfiguration.updatedAt = input.testedAt;
+        return store.activeImageModelConfiguration;
+      },
+      async listConfigurationChanges(limit = 10) {
+        return store.modelConfigurationChanges.slice(0, limit);
+      },
+      async getConfigurationChange(changeId) {
+        return store.modelConfigurationChanges.find(change => change.id === changeId);
       }
     }
   };

@@ -100,6 +100,26 @@ _Avoid_: Model response
 Whether an image generation provider returns usable output synchronously or through an asynchronous external task. V1 supports sync and async modes behind the same Provider Submission and Provider Result language.
 _Avoid_: API type
 
+**Active Image Model Configuration**:
+The admin-controlled image provider and model settings used by FluxArt when creating new image tasks. Changes affect newly created image tasks immediately, but existing tasks keep their Image Model Snapshot.
+_Avoid_: User model selection, frontend model switch
+
+**Image Model Snapshot**:
+The provider and model name recorded on an image task at creation time. It preserves which Active Image Model Configuration the task used even if the platform default changes later.
+_Avoid_: Current model, display model
+
+**Model Administration**:
+The restricted operational capability to inspect and change the Active Image Model Configuration. V1 treats Model Administration as separate from ordinary account usage and does not expose it as a user-facing image workflow.
+_Avoid_: User settings, model preference
+
+**Model Configuration Test**:
+An optional operational check that verifies an image model configuration can reach the provider and receive a valid response. It does not create user assets, consume user credits, or prove final output quality.
+_Avoid_: Test generation, free task
+
+**Model Configuration Change**:
+An audit record of a saved change to the Active Image Model Configuration, including manual restoration from a previous configuration. It records who changed the configuration, when it changed, and non-secret before-and-after configuration summaries.
+_Avoid_: Settings save log, admin activity blob
+
 **Asset Object Key**:
 The MinIO object key for a stored source image, mask, or generated asset. Public bucket keys must include non-guessable ids and should not rely on sequential database ids for secrecy.
 _Avoid_: File path

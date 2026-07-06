@@ -169,7 +169,7 @@ export async function createTask(input: CreateImageTaskInput, userId?: string): 
 
   const taskId = `TSK-${Date.now().toString(36).toUpperCase()}`;
   const { account, requiredCredits, hold } = await reserveCreditsForGeneration(userId, { taskId, taskType: input.taskType, count: input.count });
-  const modelConfig = getImageModelConfig();
+  const modelConfig = await getImageModelConfig();
   try {
     const now = new Date().toISOString();
 

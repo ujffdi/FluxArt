@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 import { billingPlans } from "@/server/billing/plans";
 import type { BillingOrder } from "@/types/billing";
 import type { AccountEntitlement, ImageAsset, ImageGenerationTask } from "@/types/image";
+import type { EditableImageModelConfiguration, ModelConfigurationTestStatus } from "@/types/model-config";
 import type { AppRepositories } from "./repositories";
-import type { CreditLedgerEntryRecord } from "./records";
+import type { ActiveImageModelConfigurationRecord, CreditLedgerEntryRecord, ModelConfigurationChangeRecord } from "./records";
 
 type RecordValue = string | number | bigint | boolean | null | Date | Record<string, unknown> | Array<unknown>;
 type DbRecord = Record<string, RecordValue | undefined>;
@@ -41,6 +42,8 @@ interface PrismaClientLike {
   assetVersionNode: PrismaDelegate;
   downloadEvent: PrismaDelegate;
   assetCleanupJob: PrismaDelegate;
+  activeImageModelConfiguration: PrismaDelegate;
+  modelConfigurationChange: PrismaDelegate;
 }
 
 let prismaClientPromise: Promise<PrismaClientLike> | undefined;
@@ -231,6 +234,69 @@ function bucketFromRecord(record: DbRecord): Awaited<ReturnType<AppRepositories[
     membershipCycleId: asString(record.membershipCycleId) || undefined,
     createdAt: toIso(record.createdAt),
     updatedAt: toIso(record.updatedAt)
+  };
+}
+
+function modelTestStatus(value: RecordValue | undefined): ModelConfigurationTestStatus {
+  const status = asString(value, "untested");
+  return status === "passed" || status === "failed" ? status : "untested";
+}
+
+function editableModelConfigFromRecord(record: DbRecord): EditableImageModelConfiguration {
+  return {
+    provider: asString(record.provider, "agnes"),
+    model: asString(record.modelName, "agnes-image-2.1-flash"),
+    baseUrl: asString(record.baseUrl, "https://apihub.agnes-ai.com/v1"),
+    apiKeySecretRef: asString(record.apiKeySecretRef, "FLUXART_IMAGE_API_KEY"),
+    executionMode: asString(record.executionMode, "mock") === "live" ? "live" : "mock",
+    requestTimeoutMs: asNumber(record.requestTimeoutMs, 120000)
+  };
+}
+
+function activeModelConfigFromRecord(record: DbRecord): ActiveImageModelConfigurationRecord {
+  return {
+    id: asString(record.id, "active"),
+    ...editableModelConfigFromRecord(record),
+    lastTestStatus: modelTestStatus(record.lastTestStatus),
+    lastTestedAt: record.lastTestedAt ? toIso(record.lastTestedAt) : undefined,
+    lastTestError: asString(record.lastTestError) || undefined,
+    updatedByUserId: asString(record.updatedByUserId) || undefined,
+    createdAt: toIso(record.createdAt),
+    updatedAt: toIso(record.updatedAt)
+  };
+}
+
+function editableModelConfigFromJson(value: RecordValue | undefined): EditableImageModelConfiguration | undefined {
+  const config = asJsonObject(value);
+  if (!Object.keys(config).length) return undefined;
+  return {
+    provider: typeof config.provider === "string" ? config.provider : "agnes",
+    model: typeof config.model === "string" ? config.model : "agnes-image-2.1-flash",
+    baseUrl: typeof config.baseUrl === "string" ? config.baseUrl : "https://apihub.agnes-ai.com/v1",
+    apiKeySecretRef: typeof config.apiKeySecretRef === "string" ? config.apiKeySecretRef : "FLUXART_IMAGE_API_KEY",
+    executionMode: config.executionMode === "live" ? "live" : "mock",
+    requestTimeoutMs: typeof config.requestTimeoutMs === "number" ? config.requestTimeoutMs : 120000
+  };
+}
+
+function modelConfigurationChangeFromRecord(record: DbRecord): ModelConfigurationChangeRecord {
+  return {
+    id: asString(record.id),
+    changedByUserId: asString(record.changedByUserId),
+    changeType: asString(record.changeType, "save") === "restore" ? "restore" : "save",
+    beforeConfig: editableModelConfigFromJson(record.beforeConfigJson),
+    afterConfig: editableModelConfigFromJson(record.afterConfigJson) || {
+      provider: "agnes",
+      model: "agnes-image-2.1-flash",
+      baseUrl: "https://apihub.agnes-ai.com/v1",
+      apiKeySecretRef: "FLUXART_IMAGE_API_KEY",
+      executionMode: "mock",
+      requestTimeoutMs: 120000
+    },
+    testStatus: modelTestStatus(record.testStatus),
+    testError: asString(record.testError) || undefined,
+    restoredFromChangeId: asString(record.restoredFromChangeId) || undefined,
+    createdAt: toIso(record.createdAt)
   };
 }
 
@@ -1758,6 +1824,87 @@ export function createPrismaRepositories(): AppRepositories {
           membershipCycleId: asString(record.membershipCycleId) || undefined,
           createdAt: toIso(record.createdAt)
         }));
+      }
+    },
+    modelConfig: {
+      async getActiveConfiguration() {
+        const prisma = await getPrismaClient();
+        const record = await prisma.activeImageModelConfiguration.findUnique?.({ where: { id: "active" } });
+        return record ? activeModelConfigFromRecord(record) : undefined;
+      },
+      async saveActiveConfiguration(input) {
+        const prisma = await getPrismaClient();
+        return runTransaction(prisma, async tx => {
+          const existing = await tx.activeImageModelConfiguration.findUnique?.({ where: { id: "active" } });
+          const beforeConfig = existing ? editableModelConfigFromRecord(existing) : undefined;
+          const now = new Date();
+          const data = {
+            provider: input.config.provider,
+            modelName: input.config.model,
+            baseUrl: input.config.baseUrl,
+            apiKeySecretRef: input.config.apiKeySecretRef,
+            executionMode: input.config.executionMode,
+            requestTimeoutMs: input.config.requestTimeoutMs,
+            lastTestStatus: input.testStatus || "untested",
+            lastTestError: input.testError || null,
+            lastTestedAt: null,
+            updatedByUserId: input.changedByUserId,
+            updatedAt: now
+          };
+          const record = existing
+            ? await tx.activeImageModelConfiguration.update?.({ where: { id: "active" }, data })
+            : await tx.activeImageModelConfiguration.create({
+              data: {
+                id: "active",
+                ...data,
+                createdAt: now
+              }
+            });
+          const configuration = activeModelConfigFromRecord(record || { id: "active", ...data, createdAt: now });
+          const changeRecord = await tx.modelConfigurationChange.create({
+            data: {
+              id: `model-change-${randomUUID()}`,
+              activeConfigurationId: "active",
+              changedByUserId: input.changedByUserId,
+              changeType: input.changeType,
+              beforeConfigJson: beforeConfig || undefined,
+              afterConfigJson: input.config,
+              testStatus: input.testStatus || "untested",
+              testError: input.testError || null,
+              restoredFromChangeId: input.restoredFromChangeId || null,
+              createdAt: now
+            }
+          });
+          return { configuration, change: modelConfigurationChangeFromRecord(changeRecord) };
+        });
+      },
+      async updateActiveConfigurationTestResult(input) {
+        const prisma = await getPrismaClient();
+        const record = await prisma.activeImageModelConfiguration.update?.({
+          where: { id: "active" },
+          data: {
+            lastTestStatus: input.testStatus,
+            lastTestedAt: input.testedAt,
+            lastTestError: input.testError || null,
+            updatedByUserId: input.updatedByUserId || null,
+            updatedAt: input.testedAt
+          }
+        });
+        return record ? activeModelConfigFromRecord(record) : undefined;
+      },
+      async listConfigurationChanges(limit = 10) {
+        const prisma = await getPrismaClient();
+        const records = await prisma.modelConfigurationChange.findMany({
+          where: { activeConfigurationId: "active" },
+          orderBy: { createdAt: "desc" },
+          take: limit
+        });
+        return records.map(modelConfigurationChangeFromRecord);
+      },
+      async getConfigurationChange(changeId) {
+        const prisma = await getPrismaClient();
+        const record = await prisma.modelConfigurationChange.findUnique?.({ where: { id: changeId } });
+        return record ? modelConfigurationChangeFromRecord(record) : undefined;
       }
     }
   };

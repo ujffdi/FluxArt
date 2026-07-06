@@ -202,13 +202,13 @@ async function run() {
     })));
 
     await page.goto(`${baseUrl}/workspace/image`);
-    await page.getByText("已登录 · Prompt Flow").waitFor({ timeout: 10000 });
-    await page.getByRole("textbox", { name: "Prompt", exact: true }).fill(customPrompt);
-    await page.getByRole("textbox", { name: "Negative Prompt", exact: true }).fill(customNegativePrompt);
+    await page.getByText("已登录 · Prompt Flow").first().waitFor({ state: "attached", timeout: 10000 });
+    await page.getByRole("textbox", { name: "提示词", exact: true }).fill(customPrompt);
+    await page.getByRole("textbox", { name: "负向提示词", exact: true }).fill(customNegativePrompt);
     await page.getByRole("button", { name: "电商海报" }).click();
-    await page.getByLabel("尺寸").selectOption("1344x768");
+    await page.getByLabel("画幅").selectOption("1344x768");
     await page.getByLabel("数量").selectOption("2");
-    await page.getByRole("button", { name: "生成图片" }).click();
+    await page.getByRole("button", { name: /生成 \d+ 张方案/ }).click();
 
     const deadline = Date.now() + 5000;
     while (capturedCreateTaskBodies.length < 1 && Date.now() < deadline) {
@@ -246,7 +246,7 @@ async function run() {
     await page.getByRole("textbox", { name: "修改方向说明" }).fill(customImagePrompt);
     await page.getByLabel("参考强度").fill("82");
     await page.getByLabel("结构保持模式").selectOption("outline");
-    await page.getByRole("button", { name: "生成图片" }).click();
+    await page.getByRole("button", { name: /生成 \d+ 张方案/ }).click();
 
     const imageDeadline = Date.now() + 5000;
     while (capturedCreateTaskBodies.length < 2 && Date.now() < imageDeadline) {
