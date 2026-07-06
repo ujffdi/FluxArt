@@ -39,6 +39,24 @@ interface TaskListPayload {
   pagination: PaginationMeta;
 }
 
+export interface WorkspaceSelectableImageModel {
+  id: string;
+  displayName: string;
+  provider: string;
+  model: string;
+  enabled: boolean;
+  isDefault: boolean;
+}
+
+export interface WorkspaceModelSelection {
+  eligible: boolean;
+  defaultModel: WorkspaceSelectableImageModel;
+  models: WorkspaceSelectableImageModel[];
+  preferredImageModelId?: string;
+  selectedImageModelId: string;
+  fallbackReason?: "not_eligible" | "missing_preference" | "unavailable_preference" | "unavailable_selection";
+}
+
 interface AuthSessionPayload {
   account: AuthAccount;
   session: AuthSession;
@@ -203,4 +221,18 @@ export async function logoutCurrentSession(): Promise<void> {
 export async function getAccountCredits(): Promise<AccountCreditsSummary> {
   const payload = await requestApi<{ credits: AccountCreditsSummary }>("/api/account/credits");
   return payload.credits;
+}
+
+export async function getWorkspaceModelSelection(): Promise<WorkspaceModelSelection> {
+  const payload = await requestApi<{ modelSelection: WorkspaceModelSelection }>("/api/image/models");
+  return payload.modelSelection;
+}
+
+export async function savePreferredImageModel(modelId: string): Promise<WorkspaceModelSelection> {
+  const payload = await requestApi<{ modelSelection: WorkspaceModelSelection }>("/api/account/preferred-model", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ modelId })
+  });
+  return payload.modelSelection;
 }

@@ -167,6 +167,7 @@ function startServerIfNeeded() {
       ...mockPaymentEnv,
       FLUXART_DATA_MODE: process.env.FLUXART_DATA_MODE || "mock",
       IMAGE_MODEL_EXECUTION: "mock",
+      FLUXART_ADMIN_USERNAMES: process.env.FLUXART_ADMIN_USERNAMES || "tongsr",
       FLUXART_ADMIN_SECRET: adminSecret
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -334,17 +335,21 @@ async function runSmoke() {
     expect(modelAdmin.body.data.presets.length >= 3, "model admin should expose preset choices");
 
     const customConfig = {
+      id: "smoke-admin-model",
+      displayName: "Smoke Admin Model",
       provider: "custom",
       model: "smoke-admin-model",
       baseUrl: "https://provider.example.test/v1",
-      apiKeySecretRef: "SMOKE_PROVIDER_KEY",
+      apiKeySecretRef: "provider.api-key",
       executionMode: "mock",
-      requestTimeoutMs: 660000
+      requestTimeoutMs: 660000,
+      enabled: true,
+      isDefault: true
     };
     const savedCustom = await request("/api/admin/model-config", {
       method: "PUT",
       headers: { "x-fluxart-admin-secret": adminSecret },
-      body: JSON.stringify({ config: customConfig })
+      body: JSON.stringify({ models: [customConfig] })
     });
     expectStatus(savedCustom, 200, "model admin save custom config");
     expect(savedCustom.body.data.configuration.model === "smoke-admin-model", "model admin should save custom model configuration");
@@ -363,12 +368,16 @@ async function runSmoke() {
       headers: { "x-fluxart-admin-secret": adminSecret },
       body: JSON.stringify({
         config: {
+          id: "agnes-image-2-1-flash",
+          displayName: "Agnes Image 2.1 Flash",
           provider: "agnes",
           model: "agnes-image-2.1-flash",
           baseUrl: "https://apihub.agnes-ai.com/v1",
           apiKeySecretRef: "FLUXART_IMAGE_API_KEY",
           executionMode: "mock",
-          requestTimeoutMs: 120000
+          requestTimeoutMs: 120000,
+          enabled: true,
+          isDefault: true
         }
       })
     });
@@ -381,6 +390,26 @@ async function runSmoke() {
     });
     expectStatus(restoredCustom, 200, "model admin restore config");
     expect(restoredCustom.body.data.configuration.model === "smoke-admin-model", "model admin should restore a previous configuration");
+
+    if (!explicitBaseUrl) {
+      const tongsrRegistration = await request("/api/auth/register", {
+        method: "POST",
+        body: JSON.stringify({ username: "tongsr", password: "admin-smoke-password-1", displayName: "Admin Smoke" })
+      });
+      expectStatus(tongsrRegistration, 200, "register admin username");
+      expect(tongsrRegistration.body.data.account.username === "tongsr", "admin smoke should register tongsr");
+      expect(tongsrRegistration.body.data.account.isModelAdmin === true, "admin username auth payload should expose model admin status");
+
+      const usernameAdmin = await request("/api/admin/model-config");
+      expectStatus(usernameAdmin, 200, "model admin read with admin username");
+      expect(usernameAdmin.body.data.configuration.model === "smoke-admin-model", "tongsr should access model admin without an admin secret");
+
+      const restoreDemoLogin = await request("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ username: "demo", password: "demo-password-1" })
+      });
+      expectStatus(restoreDemoLogin, 200, "restore demo login after admin username smoke");
+    }
   }
 
   const invalidTask = await request("/api/image/tasks", {

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { billingPlans } from "@/server/billing/plans";
 import type { BillingOrder } from "@/types/billing";
 import type { AccountEntitlement, ImageAsset, ImageGenerationTask } from "@/types/image";
-import type { EditableImageModelConfiguration, ModelConfigurationTestStatus } from "@/types/model-config";
+import type { EditableSelectableImageModel, ModelConfigurationTestStatus } from "@/types/model-config";
 import type { AppRepositories } from "./repositories";
 import type { ActiveImageModelConfigurationRecord, CreditLedgerEntryRecord, ModelConfigurationChangeRecord } from "./records";
 
@@ -40,16 +40,18 @@ interface PrismaClientLike {
   assetVersionNode: PrismaDelegate;
   downloadEvent: PrismaDelegate;
   assetCleanupJob: PrismaDelegate;
-  activeImageModelConfiguration: PrismaDelegate;
-  modelConfigurationChange: PrismaDelegate;
+  activeImageModelConfiguration?: PrismaDelegate;
+  modelConfigurationChange?: PrismaDelegate;
 }
 
 let prismaClientPromise: Promise<PrismaClientLike> | undefined;
 let testPrismaClient: PrismaClientLike | undefined;
+let modelConfigTablesEnsured = false;
 
 export function setPrismaClientForTesting(client: PrismaClientLike | undefined) {
   testPrismaClient = client;
   prismaClientPromise = undefined;
+  modelConfigTablesEnsured = false;
 }
 
 async function getPrismaClient(): Promise<PrismaClientLike> {
@@ -99,6 +101,14 @@ function asNumber(value: RecordValue | undefined, fallback = 0) {
 }
 
 function asJsonObject(value: RecordValue | undefined): Record<string, unknown> {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+    } catch {
+      return {};
+    }
+  }
   return typeof value === "object" && value !== null && !(value instanceof Date) && !Array.isArray(value) ? value : {};
 }
 
@@ -131,6 +141,7 @@ function accountFromUser(user: DbRecord, credits: number, username: string): Acc
     displayName: asString(user.displayName, "FluxArt User"),
     credits,
     memberStatus,
+    preferredImageModelId: asString(user.preferredImageModelId) || undefined,
     canUseOutpaint: memberStatus === "credit_pack",
     canDownloadHd: memberStatus === "credit_pack",
     canDownloadWithoutWatermark: memberStatus === "credit_pack"
@@ -233,20 +244,23 @@ function modelTestStatus(value: RecordValue | undefined): ModelConfigurationTest
   return status === "passed" || status === "failed" ? status : "untested";
 }
 
-function editableModelConfigFromRecord(record: DbRecord): EditableImageModelConfiguration {
+function editableModelConfigFromRecord(record: DbRecord): EditableSelectableImageModel {
   return {
+    id: asString(record.id, "active"),
+    displayName: asString(record.displayName, "Default Image Model"),
     provider: asString(record.provider, "agnes"),
     model: asString(record.modelName, "agnes-image-2.1-flash"),
     baseUrl: asString(record.baseUrl, "https://apihub.agnes-ai.com/v1"),
     apiKeySecretRef: asString(record.apiKeySecretRef, "FLUXART_IMAGE_API_KEY"),
     executionMode: asString(record.executionMode, "mock") === "live" ? "live" : "mock",
-    requestTimeoutMs: asNumber(record.requestTimeoutMs, 120000)
+    requestTimeoutMs: asNumber(record.requestTimeoutMs, 120000),
+    enabled: record.enabled !== false,
+    isDefault: record.isDefault === true || asString(record.id) === "active"
   };
 }
 
 function activeModelConfigFromRecord(record: DbRecord): ActiveImageModelConfigurationRecord {
   return {
-    id: asString(record.id, "active"),
     ...editableModelConfigFromRecord(record),
     lastTestStatus: modelTestStatus(record.lastTestStatus),
     lastTestedAt: record.lastTestedAt ? toIso(record.lastTestedAt) : undefined,
@@ -257,17 +271,36 @@ function activeModelConfigFromRecord(record: DbRecord): ActiveImageModelConfigur
   };
 }
 
-function editableModelConfigFromJson(value: RecordValue | undefined): EditableImageModelConfiguration | undefined {
-  const config = asJsonObject(value);
-  if (!Object.keys(config).length) return undefined;
+function editableModelConfigFromJsonObject(config: Record<string, unknown>): EditableSelectableImageModel {
   return {
+    id: typeof config.id === "string" ? config.id : "active",
+    displayName: typeof config.displayName === "string" ? config.displayName : "Default Image Model",
     provider: typeof config.provider === "string" ? config.provider : "agnes",
     model: typeof config.model === "string" ? config.model : "agnes-image-2.1-flash",
     baseUrl: typeof config.baseUrl === "string" ? config.baseUrl : "https://apihub.agnes-ai.com/v1",
     apiKeySecretRef: typeof config.apiKeySecretRef === "string" ? config.apiKeySecretRef : "FLUXART_IMAGE_API_KEY",
     executionMode: config.executionMode === "live" ? "live" : "mock",
-    requestTimeoutMs: typeof config.requestTimeoutMs === "number" ? config.requestTimeoutMs : 120000
+    requestTimeoutMs: typeof config.requestTimeoutMs === "number" ? config.requestTimeoutMs : 120000,
+    enabled: typeof config.enabled === "boolean" ? config.enabled : true,
+    isDefault: typeof config.isDefault === "boolean" ? config.isDefault : config.id === "active"
   };
+}
+
+function editableModelConfigListFromJson(value: RecordValue | undefined): EditableSelectableImageModel[] | undefined {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return editableModelConfigListFromJson(parsed as RecordValue);
+    } catch {
+      return undefined;
+    }
+  }
+  if (Array.isArray(value)) {
+    return value.filter(item => typeof item === "object" && item !== null).map(item => editableModelConfigFromJsonObject(item as Record<string, unknown>));
+  }
+  const config = asJsonObject(value);
+  if (!Object.keys(config).length) return undefined;
+  return [editableModelConfigFromJsonObject(config)];
 }
 
 function modelConfigurationChangeFromRecord(record: DbRecord): ModelConfigurationChangeRecord {
@@ -275,20 +308,334 @@ function modelConfigurationChangeFromRecord(record: DbRecord): ModelConfiguratio
     id: asString(record.id),
     changedByUserId: asString(record.changedByUserId),
     changeType: asString(record.changeType, "save") === "restore" ? "restore" : "save",
-    beforeConfig: editableModelConfigFromJson(record.beforeConfigJson),
-    afterConfig: editableModelConfigFromJson(record.afterConfigJson) || {
-      provider: "agnes",
-      model: "agnes-image-2.1-flash",
-      baseUrl: "https://apihub.agnes-ai.com/v1",
-      apiKeySecretRef: "FLUXART_IMAGE_API_KEY",
-      executionMode: "mock",
-      requestTimeoutMs: 120000
-    },
+    beforeConfig: editableModelConfigListFromJson(record.beforeConfigJson),
+    afterConfig: editableModelConfigListFromJson(record.afterConfigJson) || [editableModelConfigFromJsonObject({})],
     testStatus: modelTestStatus(record.testStatus),
     testError: asString(record.testError) || undefined,
     restoredFromChangeId: asString(record.restoredFromChangeId) || undefined,
     createdAt: toIso(record.createdAt)
   };
+}
+
+type RawSqlPrismaClient = PrismaClientLike & {
+  $executeRawUnsafe: NonNullable<PrismaClientLike["$executeRawUnsafe"]>;
+  $queryRawUnsafe: NonNullable<PrismaClientLike["$queryRawUnsafe"]>;
+};
+
+const activeModelConfigurationSelect = `
+  SELECT
+    id,
+    display_name AS displayName,
+    provider,
+    model_name AS modelName,
+    base_url AS baseUrl,
+    api_key_secret_ref AS apiKeySecretRef,
+    execution_mode AS executionMode,
+    request_timeout_ms AS requestTimeoutMs,
+    enabled,
+    is_default AS isDefault,
+    last_test_status AS lastTestStatus,
+    last_tested_at AS lastTestedAt,
+    last_test_error AS lastTestError,
+    updated_by_user_id AS updatedByUserId,
+    created_at AS createdAt,
+    updated_at AS updatedAt
+  FROM active_image_model_configurations
+`;
+
+const modelConfigurationChangeSelect = `
+  SELECT
+    id,
+    active_configuration_id AS activeConfigurationId,
+    changed_by_user_id AS changedByUserId,
+    change_type AS changeType,
+    before_config_json AS beforeConfigJson,
+    after_config_json AS afterConfigJson,
+    test_status AS testStatus,
+    test_error AS testError,
+    restored_from_change_id AS restoredFromChangeId,
+    created_at AS createdAt
+  FROM model_configuration_changes
+`;
+
+const createActiveModelConfigurationTableSql = `
+  CREATE TABLE IF NOT EXISTS \`active_image_model_configurations\` (
+    \`id\` VARCHAR(64) NOT NULL,
+    \`display_name\` VARCHAR(120) NOT NULL DEFAULT 'Default Image Model',
+    \`provider\` VARCHAR(64) NOT NULL,
+    \`model_name\` VARCHAR(120) NOT NULL,
+    \`base_url\` VARCHAR(512) NOT NULL,
+    \`api_key_secret_ref\` VARCHAR(128) NOT NULL,
+    \`execution_mode\` VARCHAR(16) NOT NULL,
+    \`request_timeout_ms\` INT NOT NULL,
+    \`enabled\` BOOLEAN NOT NULL DEFAULT true,
+    \`is_default\` BOOLEAN NOT NULL DEFAULT false,
+    \`last_test_status\` VARCHAR(16) NOT NULL DEFAULT 'untested',
+    \`last_tested_at\` DATETIME(3) NULL,
+    \`last_test_error\` VARCHAR(512) NULL,
+    \`updated_by_user_id\` VARCHAR(191) NULL,
+    \`created_at\` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    \`updated_at\` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (\`id\`)
+  )
+`;
+
+const createModelConfigurationChangesTableSql = `
+  CREATE TABLE IF NOT EXISTS \`model_configuration_changes\` (
+    \`id\` VARCHAR(191) NOT NULL,
+    \`active_configuration_id\` VARCHAR(64) NOT NULL DEFAULT 'active',
+    \`changed_by_user_id\` VARCHAR(191) NOT NULL,
+    \`change_type\` VARCHAR(16) NOT NULL,
+    \`before_config_json\` JSON NULL,
+    \`after_config_json\` JSON NOT NULL,
+    \`test_status\` VARCHAR(16) NOT NULL DEFAULT 'untested',
+    \`test_error\` VARCHAR(512) NULL,
+    \`restored_from_change_id\` VARCHAR(191) NULL,
+    \`created_at\` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (\`id\`),
+    KEY \`model_config_changes_active_created_idx\` (\`active_configuration_id\`, \`created_at\`),
+    KEY \`model_config_changes_created_idx\` (\`created_at\`),
+    CONSTRAINT \`model_configuration_changes_active_configuration_id_fkey\` FOREIGN KEY (\`active_configuration_id\`) REFERENCES \`active_image_model_configurations\`(\`id\`)
+  )
+`;
+
+function requireModelConfigRawSql(client: PrismaClientLike): RawSqlPrismaClient {
+  if (!client.$executeRawUnsafe || !client.$queryRawUnsafe) {
+    throw new Error("Prisma client does not expose model configuration delegates or raw SQL support. Run `npx prisma generate` after applying the latest schema.");
+  }
+  return client as RawSqlPrismaClient;
+}
+
+async function ensureModelConfigTables(client: RawSqlPrismaClient) {
+  if (modelConfigTablesEnsured) return;
+  await client.$executeRawUnsafe(createActiveModelConfigurationTableSql);
+  await client.$executeRawUnsafe(createModelConfigurationChangesTableSql);
+  modelConfigTablesEnsured = true;
+}
+
+async function maybeEnsureModelConfigTables(client: PrismaClientLike) {
+  if (client.$executeRawUnsafe && client.$queryRawUnsafe) {
+    await ensureModelConfigTables(client as RawSqlPrismaClient);
+  }
+}
+
+function jsonColumnValue(value: unknown) {
+  return value === undefined ? null : JSON.stringify(value);
+}
+
+async function findActiveModelConfigurationRecord(client: PrismaClientLike) {
+  const records = await listActiveModelConfigurationRecords(client);
+  return records.find(record => record.enabled !== false && record.isDefault === true)
+    || records.find(record => record.enabled !== false)
+    || records[0]
+    || null;
+}
+
+async function listActiveModelConfigurationRecords(client: PrismaClientLike) {
+  await maybeEnsureModelConfigTables(client);
+  if (client.activeImageModelConfiguration?.findMany) {
+    return client.activeImageModelConfiguration.findMany({ orderBy: { createdAt: "asc" } });
+  }
+
+  const rawClient = requireModelConfigRawSql(client);
+  return rawClient.$queryRawUnsafe(`${activeModelConfigurationSelect} ORDER BY created_at ASC`);
+}
+
+async function saveSelectableModelConfigurationRecords(client: PrismaClientLike, models: DbRecord[]) {
+  const delegate = client.activeImageModelConfiguration;
+  const ids = models.map(model => asString(model.id)).filter(Boolean);
+  if (delegate) {
+    if (delegate.updateMany && ids.length) {
+      await delegate.updateMany({ where: { id: { notIn: ids } }, data: { enabled: false } });
+    }
+    const saved: DbRecord[] = [];
+    for (const model of models) {
+      const existing = delegate.findUnique ? await delegate.findUnique({ where: { id: model.id } }) : null;
+      const { createdAt, ...updateData } = model;
+      const record = existing && delegate.update
+        ? await delegate.update({ where: { id: model.id }, data: updateData })
+        : await delegate.create({ data: { ...model, createdAt: createdAt || model.updatedAt } });
+      saved.push(record);
+    }
+    return saved;
+  }
+
+  const rawClient = requireModelConfigRawSql(client);
+  if (ids.length) {
+    await rawClient.$executeRawUnsafe(
+      `UPDATE active_image_model_configurations SET enabled = false WHERE id NOT IN (${ids.map(() => "?").join(", ")})`,
+      ...ids
+    );
+  }
+  for (const data of models) {
+    const createdAt = data.createdAt || data.updatedAt;
+    const isDefault = data.isDefault ? 1 : 0;
+    const enabled = data.enabled ? 1 : 0;
+  await rawClient.$executeRawUnsafe(
+    `INSERT INTO active_image_model_configurations (
+       id,
+       display_name,
+       provider,
+       model_name,
+       base_url,
+       api_key_secret_ref,
+       execution_mode,
+       request_timeout_ms,
+       enabled,
+       is_default,
+       last_test_status,
+       last_tested_at,
+       last_test_error,
+       updated_by_user_id,
+       created_at,
+       updated_at
+     )
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       display_name = VALUES(display_name),
+       provider = VALUES(provider),
+       model_name = VALUES(model_name),
+       base_url = VALUES(base_url),
+       api_key_secret_ref = VALUES(api_key_secret_ref),
+       execution_mode = VALUES(execution_mode),
+       request_timeout_ms = VALUES(request_timeout_ms),
+       enabled = VALUES(enabled),
+       is_default = VALUES(is_default),
+       last_test_status = VALUES(last_test_status),
+       last_tested_at = VALUES(last_tested_at),
+       last_test_error = VALUES(last_test_error),
+       updated_by_user_id = VALUES(updated_by_user_id),
+       updated_at = VALUES(updated_at)`,
+    data.id,
+    data.displayName,
+    data.provider,
+    data.modelName,
+    data.baseUrl,
+    data.apiKeySecretRef,
+    data.executionMode,
+    data.requestTimeoutMs,
+    enabled,
+    isDefault,
+    data.lastTestStatus,
+    data.lastTestedAt,
+    data.lastTestError,
+    data.updatedByUserId,
+    createdAt || data.updatedAt,
+    data.updatedAt
+  );
+  }
+
+  return listActiveModelConfigurationRecords(client);
+}
+
+async function updateActiveModelConfigurationTestResultRecord(
+  client: PrismaClientLike,
+  input: {
+    testStatus: ModelConfigurationTestStatus;
+    testedAt: string;
+    testError?: string;
+    updatedByUserId?: string;
+    modelId?: string;
+  }
+) {
+  const modelId = input.modelId || "active";
+  await maybeEnsureModelConfigTables(client);
+  if (client.activeImageModelConfiguration?.update) {
+    return client.activeImageModelConfiguration.update({
+      where: { id: modelId },
+      data: {
+        lastTestStatus: input.testStatus,
+        lastTestedAt: input.testedAt,
+        lastTestError: input.testError || null,
+        updatedByUserId: input.updatedByUserId || null,
+        updatedAt: input.testedAt
+      }
+    });
+  }
+
+  const rawClient = requireModelConfigRawSql(client);
+  await rawClient.$executeRawUnsafe(
+    `UPDATE active_image_model_configurations
+     SET last_test_status = ?,
+         last_tested_at = ?,
+         last_test_error = ?,
+         updated_by_user_id = ?,
+         updated_at = ?
+     WHERE id = ?`,
+    input.testStatus,
+    input.testedAt,
+    input.testError || null,
+    input.updatedByUserId || null,
+    input.testedAt,
+    modelId
+  );
+  const [record] = await rawClient.$queryRawUnsafe(`${activeModelConfigurationSelect} WHERE id = ? LIMIT 1`, modelId);
+  return record || null;
+}
+
+async function createModelConfigurationChangeRecord(client: PrismaClientLike, data: DbRecord) {
+  await maybeEnsureModelConfigTables(client);
+  if (client.modelConfigurationChange) {
+    return client.modelConfigurationChange.create({ data });
+  }
+
+  const rawClient = requireModelConfigRawSql(client);
+  await rawClient.$executeRawUnsafe(
+    `INSERT INTO model_configuration_changes (
+       id,
+       active_configuration_id,
+       changed_by_user_id,
+       change_type,
+       before_config_json,
+       after_config_json,
+       test_status,
+       test_error,
+       restored_from_change_id,
+       created_at
+     )
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    data.id,
+    data.activeConfigurationId,
+    data.changedByUserId,
+    data.changeType,
+    jsonColumnValue(data.beforeConfigJson),
+    jsonColumnValue(data.afterConfigJson),
+    data.testStatus,
+    data.testError,
+    data.restoredFromChangeId,
+    data.createdAt
+  );
+  const [record] = await rawClient.$queryRawUnsafe(`${modelConfigurationChangeSelect} WHERE id = ? LIMIT 1`, data.id);
+  return record || data;
+}
+
+async function listModelConfigurationChangeRecords(client: PrismaClientLike, limit: number) {
+  await maybeEnsureModelConfigTables(client);
+  if (client.modelConfigurationChange) {
+    return client.modelConfigurationChange.findMany({
+      orderBy: { createdAt: "desc" },
+      take: limit
+    });
+  }
+
+  const safeLimit = Number.isFinite(limit) ? Math.max(0, Math.min(Math.trunc(limit), 100)) : 10;
+  const rawClient = requireModelConfigRawSql(client);
+  return rawClient.$queryRawUnsafe(
+    `${modelConfigurationChangeSelect}
+     ORDER BY created_at DESC
+     LIMIT ${safeLimit}`
+  );
+}
+
+async function findModelConfigurationChangeRecord(client: PrismaClientLike, changeId: string) {
+  await maybeEnsureModelConfigTables(client);
+  if (client.modelConfigurationChange?.findUnique) {
+    return client.modelConfigurationChange.findUnique({ where: { id: changeId } });
+  }
+
+  const rawClient = requireModelConfigRawSql(client);
+  const [record] = await rawClient.$queryRawUnsafe(`${modelConfigurationChangeSelect} WHERE id = ? LIMIT 1`, changeId);
+  return record || null;
 }
 
 export function createPrismaRepositories(): AppRepositories {
@@ -541,6 +888,7 @@ export function createPrismaRepositories(): AppRepositories {
           displayName: asString(user.displayName),
           status: asString(user.status, "active") as "active" | "disabled",
           memberStatus: asString(user.memberStatus, "free") as AccountEntitlement["memberStatus"],
+          preferredImageModelId: asString(user.preferredImageModelId) || undefined,
           createdAt: toIso(user.createdAt),
           updatedAt: toIso(user.updatedAt)
         };
@@ -565,6 +913,7 @@ export function createPrismaRepositories(): AppRepositories {
           displayName: asString(user.displayName),
           status: asString(user.status, "active") as "active" | "disabled",
           memberStatus: asString(user.memberStatus, "free") as AccountEntitlement["memberStatus"],
+          preferredImageModelId: asString(user.preferredImageModelId) || undefined,
           createdAt: toIso(user.createdAt),
           updatedAt: toIso(user.updatedAt)
         };
@@ -579,6 +928,22 @@ export function createPrismaRepositories(): AppRepositories {
           displayName: asString(user.displayName),
           status: asString(user.status, "active") as "active" | "disabled",
           memberStatus: asString(user.memberStatus, "free") as AccountEntitlement["memberStatus"],
+          preferredImageModelId: asString(user.preferredImageModelId) || undefined,
+          createdAt: toIso(user.createdAt),
+          updatedAt: toIso(user.updatedAt)
+        };
+      },
+      async updatePreferredImageModel(userId, preferredImageModelId) {
+        const prisma = await getPrismaClient();
+        const user = await prisma.user.update?.({ where: { id: userId }, data: { preferredImageModelId: preferredImageModelId || null } });
+        if (!user) return undefined;
+        return {
+          id: asString(user.id),
+          username: asString((await prisma.userCredential.findUnique?.({ where: { userId } }))?.username),
+          displayName: asString(user.displayName),
+          status: asString(user.status, "active") as "active" | "disabled",
+          memberStatus: asString(user.memberStatus, "free") as AccountEntitlement["memberStatus"],
+          preferredImageModelId: asString(user.preferredImageModelId) || undefined,
           createdAt: toIso(user.createdAt),
           updatedAt: toIso(user.updatedAt)
         };
@@ -1606,83 +1971,90 @@ export function createPrismaRepositories(): AppRepositories {
       }
     },
     modelConfig: {
-      async getActiveConfiguration() {
+      async listConfigurations() {
         const prisma = await getPrismaClient();
-        const record = await prisma.activeImageModelConfiguration.findUnique?.({ where: { id: "active" } });
-        return record ? activeModelConfigFromRecord(record) : undefined;
+        const records = await listActiveModelConfigurationRecords(prisma);
+        return records.map(activeModelConfigFromRecord);
       },
-      async saveActiveConfiguration(input) {
+      async saveConfigurations(input) {
         const prisma = await getPrismaClient();
+        await maybeEnsureModelConfigTables(prisma);
         return runTransaction(prisma, async tx => {
-          const existing = await tx.activeImageModelConfiguration.findUnique?.({ where: { id: "active" } });
-          const beforeConfig = existing ? editableModelConfigFromRecord(existing) : undefined;
+          const existing = await listActiveModelConfigurationRecords(tx);
+          const beforeConfig = existing.length ? existing.map(editableModelConfigFromRecord) : undefined;
           const now = new Date();
-          const data = {
-            provider: input.config.provider,
-            modelName: input.config.model,
-            baseUrl: input.config.baseUrl,
-            apiKeySecretRef: input.config.apiKeySecretRef,
-            executionMode: input.config.executionMode,
-            requestTimeoutMs: input.config.requestTimeoutMs,
+          const existingCreatedAt = new Map(existing.map(record => [asString(record.id), record.createdAt || now]));
+          const records = await saveSelectableModelConfigurationRecords(tx, input.models.map(model => ({
+            id: model.id,
+            displayName: model.displayName,
+            provider: model.provider,
+            modelName: model.model,
+            baseUrl: model.baseUrl,
+            apiKeySecretRef: model.apiKeySecretRef,
+            executionMode: model.executionMode,
+            requestTimeoutMs: model.requestTimeoutMs,
+            enabled: model.enabled,
+            isDefault: model.isDefault,
             lastTestStatus: input.testStatus || "untested",
             lastTestError: input.testError || null,
             lastTestedAt: null,
             updatedByUserId: input.changedByUserId,
+            createdAt: existingCreatedAt.get(model.id) || now,
             updatedAt: now
-          };
-          const record = existing
-            ? await tx.activeImageModelConfiguration.update?.({ where: { id: "active" }, data })
-            : await tx.activeImageModelConfiguration.create({
-              data: {
-                id: "active",
-                ...data,
-                createdAt: now
-              }
-            });
-          const configuration = activeModelConfigFromRecord(record || { id: "active", ...data, createdAt: now });
-          const changeRecord = await tx.modelConfigurationChange.create({
-            data: {
-              id: `model-change-${randomUUID()}`,
-              activeConfigurationId: "active",
-              changedByUserId: input.changedByUserId,
-              changeType: input.changeType,
-              beforeConfigJson: beforeConfig || undefined,
-              afterConfigJson: input.config,
-              testStatus: input.testStatus || "untested",
-              testError: input.testError || null,
-              restoredFromChangeId: input.restoredFromChangeId || null,
-              createdAt: now
-            }
+          })));
+          const configurations = records.map(activeModelConfigFromRecord);
+          const defaultConfig = configurations.find(model => model.enabled && model.isDefault) || configurations[0];
+          const changeRecord = await createModelConfigurationChangeRecord(tx, {
+            id: `model-change-${randomUUID()}`,
+            activeConfigurationId: defaultConfig?.id || input.models[0]?.id || "active",
+            changedByUserId: input.changedByUserId,
+            changeType: input.changeType,
+            beforeConfigJson: beforeConfig,
+            afterConfigJson: input.models,
+            testStatus: input.testStatus || "untested",
+            testError: input.testError || null,
+            restoredFromChangeId: input.restoredFromChangeId || null,
+            createdAt: now
           });
-          return { configuration, change: modelConfigurationChangeFromRecord(changeRecord) };
+          return { configurations, change: modelConfigurationChangeFromRecord(changeRecord) };
         });
+      },
+      async getActiveConfiguration() {
+        const prisma = await getPrismaClient();
+        const record = await findActiveModelConfigurationRecord(prisma);
+        return record ? activeModelConfigFromRecord(record) : undefined;
+      },
+      async saveActiveConfiguration(input) {
+        const result = await this.saveConfigurations({
+          models: [{
+            id: "active",
+            displayName: "Default Image Model",
+            ...input.config,
+            enabled: true,
+            isDefault: true
+          }],
+          changedByUserId: input.changedByUserId,
+          changeType: input.changeType,
+          restoredFromChangeId: input.restoredFromChangeId,
+          testStatus: input.testStatus,
+          testError: input.testError
+        });
+        const configuration = result.configurations.find(model => model.enabled && model.isDefault) || result.configurations[0];
+        return { configuration, change: result.change };
       },
       async updateActiveConfigurationTestResult(input) {
         const prisma = await getPrismaClient();
-        const record = await prisma.activeImageModelConfiguration.update?.({
-          where: { id: "active" },
-          data: {
-            lastTestStatus: input.testStatus,
-            lastTestedAt: input.testedAt,
-            lastTestError: input.testError || null,
-            updatedByUserId: input.updatedByUserId || null,
-            updatedAt: input.testedAt
-          }
-        });
+        const record = await updateActiveModelConfigurationTestResultRecord(prisma, input);
         return record ? activeModelConfigFromRecord(record) : undefined;
       },
       async listConfigurationChanges(limit = 10) {
         const prisma = await getPrismaClient();
-        const records = await prisma.modelConfigurationChange.findMany({
-          where: { activeConfigurationId: "active" },
-          orderBy: { createdAt: "desc" },
-          take: limit
-        });
+        const records = await listModelConfigurationChangeRecords(prisma, limit);
         return records.map(modelConfigurationChangeFromRecord);
       },
       async getConfigurationChange(changeId) {
         const prisma = await getPrismaClient();
-        const record = await prisma.modelConfigurationChange.findUnique?.({ where: { id: changeId } });
+        const record = await findModelConfigurationChangeRecord(prisma, changeId);
         return record ? modelConfigurationChangeFromRecord(record) : undefined;
       }
     }

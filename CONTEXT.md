@@ -9,11 +9,11 @@ A prepaid unit of consumption used to pay for image generation, image editing, o
 _Avoid_: Token, coin, point
 
 **Purchased Credit**:
-Credit obtained through a paid credit package. Purchased Credits are intended to be long-lived and should not feel like a short-term trial entitlement.
+Credit obtained through a paid credit package. New Purchased Credits are valid for one month after purchase in the current product model.
 _Avoid_: Paid point, cash credit
 
 **Credit Validity Window**:
-The time period during which a Credit Bucket can be spent. Purchased Credits should be long-lived in V1, either effectively long-term or valid for at least two years.
+The time period during which a Credit Bucket can be spent. New Credit Buckets are valid for one month after they are granted or purchased; existing buckets keep their previously assigned validity windows unless a migration explicitly changes them.
 _Avoid_: Expiry rule
 
 **Promotional Credit**:
@@ -101,15 +101,15 @@ Whether an image generation provider returns usable output synchronously or thro
 _Avoid_: API type
 
 **Active Image Model Configuration**:
-The admin-controlled image provider and model settings used by FluxArt when creating new image tasks. Changes affect newly created image tasks immediately, but existing tasks keep their Image Model Snapshot.
-_Avoid_: User model selection, frontend model switch
+The legacy single-model configuration concept that preceded Selectable Image Models. New model-selection work should use Selectable Image Models and Default Image Model language instead.
+_Avoid_: User model selection, model catalog
 
 **Image Model Snapshot**:
-The provider and model name recorded on an image task at creation time. It preserves which Active Image Model Configuration the task used even if the platform default changes later.
+The provider and model name recorded on an image task at creation time. It preserves which model the task used even if the platform default or selectable model list changes later.
 _Avoid_: Current model, display model
 
 **Model Administration**:
-The restricted operational capability to inspect and change the Active Image Model Configuration. V1 treats Model Administration as separate from ordinary account usage and does not expose it as a user-facing image workflow.
+The restricted operational capability to inspect and change Selectable Image Models and the Default Image Model. V1 grants it to usernames in the admin allowlist, defaulting to `tongsr`, with `FLUXART_ADMIN_SECRET` kept as a backup access path for other authenticated operators.
 _Avoid_: User settings, model preference
 
 **Model Configuration Test**:
@@ -117,8 +117,32 @@ An optional operational check that verifies an image model configuration can rea
 _Avoid_: Test generation, free task
 
 **Model Configuration Change**:
-An audit record of a saved change to the Active Image Model Configuration, including manual restoration from a previous configuration. It records who changed the configuration, when it changed, and non-secret before-and-after configuration summaries.
+An audit record of a saved change to Selectable Image Models or the Default Image Model. It records who changed model administration state, when it changed, and non-secret before-and-after configuration summaries.
 _Avoid_: Settings save log, admin activity blob
+
+**Selectable Image Model**:
+An admin-configured image model that eligible users may choose when creating new image tasks. Each Selectable Image Model has a display name, provider, model name, base URL, secret reference, execution mode, timeout, enabled state, and default marker.
+_Avoid_: User model config, custom model
+
+**Default Image Model**:
+The single enabled Selectable Image Model FluxArt uses when a user is not eligible for model selection or has not chosen a model. Model Administration must keep exactly one Default Image Model and at least one enabled Selectable Image Model.
+_Avoid_: Fallback model, free model
+
+**Model Selection Eligibility**:
+The product right to choose among Selectable Image Models. V1 grants this right after a user has successfully purchased any Credit Pack, but task creation still requires enough unexpired credits and the selected model does not change the Base Credit Cost.
+_Avoid_: Model unlock, paid model access
+
+**Model Selection Prompt**:
+The user-facing purchase guidance shown when a Free User encounters model selection. It explains that purchasing credits enables model choice while the Default Image Model remains available for free trial usage.
+_Avoid_: Mode upsell, locked dropdown copy
+
+**Preferred Image Model**:
+The Selectable Image Model a model-eligible user last chose for new image tasks. It is a user preference, while Image Model Snapshot records what an individual task actually used.
+_Avoid_: Current model, saved task model
+
+**Unavailable Preferred Image Model**:
+A Preferred Image Model that is no longer enabled for new image tasks. FluxArt falls back to the Default Image Model for new tasks while historical Image Model Snapshots remain unchanged.
+_Avoid_: Deleted model, broken preference
 
 **Asset Object Key**:
 The MinIO object key for a stored source image, mask, or generated asset. Public bucket keys must include non-guessable ids and should not rely on sequential database ids for secrecy.
@@ -217,7 +241,7 @@ A user who has purchased a fixed credit package. Credit Pack Users pay by consum
 _Avoid_: Pay-as-you-go user, paid user
 
 **Credit Pack**:
-A paid package that grants a fixed amount of Purchased Credits. V1 offers 500, 1500, and 5000 credit packs.
+A paid package that grants a fixed amount of one-month Purchased Credits. V1 offers 500, 1500, and 5000 credit packs.
 _Avoid_: Recharge package, top-up plan
 
 **Watermarked Download**:

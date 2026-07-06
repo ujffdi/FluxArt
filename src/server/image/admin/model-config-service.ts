@@ -1,7 +1,7 @@
 import { getRepositories } from "@/server/data/repositories";
 import { getEnvImageModelConfig } from "@/server/image/ai/model-config";
 import type { ActiveImageModelConfigurationRecord } from "@/server/data/records";
-import type { EditableImageModelConfiguration, ModelConfigurationTestStatus } from "@/types/model-config";
+import type { EditableImageModelConfiguration, EditableSelectableImageModel, ModelConfigurationTestStatus } from "@/types/model-config";
 
 export class ModelConfigurationError extends Error {
   constructor(message: string, public code: string, public status = 400) {
@@ -15,42 +15,54 @@ export const modelConfigurationPresets = [
     id: "agnes-image-2.1-flash",
     label: "Agnes Image 2.1 Flash",
     config: {
+      id: "agnes-image-2-1-flash",
+      displayName: "Agnes Image 2.1 Flash",
       provider: "agnes",
       model: "agnes-image-2.1-flash",
       baseUrl: "https://apihub.agnes-ai.com/v1",
       apiKeySecretRef: "FLUXART_IMAGE_API_KEY",
       executionMode: "mock",
-      requestTimeoutMs: 120000
-    } satisfies EditableImageModelConfiguration
+      requestTimeoutMs: 120000,
+      enabled: true,
+      isDefault: true
+    } satisfies EditableSelectableImageModel
   },
   {
     id: "openai-compatible",
     label: "OpenAI compatible",
     config: {
+      id: "openai-compatible",
+      displayName: "OpenAI compatible",
       provider: "openai",
       model: "gpt-image-2",
       baseUrl: "https://api.openai.com/v1",
       apiKeySecretRef: "FLUXART_IMAGE_API_KEY",
       executionMode: "mock",
-      requestTimeoutMs: 120000
-    } satisfies EditableImageModelConfiguration
+      requestTimeoutMs: 120000,
+      enabled: true,
+      isDefault: false
+    } satisfies EditableSelectableImageModel
   },
   {
     id: "custom-compatible",
     label: "Custom compatible",
     config: {
+      id: "custom-compatible",
+      displayName: "Custom compatible",
       provider: "custom",
       model: "custom-image-model",
       baseUrl: "https://provider.example.com/v1",
       apiKeySecretRef: "CUSTOM_PROVIDER_API_KEY",
       executionMode: "mock",
-      requestTimeoutMs: 120000
-    } satisfies EditableImageModelConfiguration
+      requestTimeoutMs: 120000,
+      enabled: false,
+      isDefault: false
+    } satisfies EditableSelectableImageModel
   }
 ];
 
 const supportedProviders = new Set(["agnes", "openai", "custom"]);
-const secretRefPattern = /^[A-Z][A-Z0-9_]{1,127}$/;
+const secretRefMaxLength = 128;
 
 function trimString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -87,8 +99,8 @@ export function validateModelConfiguration(input: unknown): EditableImageModelCo
   if (!baseUrl || baseUrl.length > 512 || !validUrl(baseUrl)) {
     throw new ModelConfigurationError("baseUrl must be a valid http or https URL", "MODEL_BASE_URL_INVALID");
   }
-  if (!secretRefPattern.test(apiKeySecretRef)) {
-    throw new ModelConfigurationError("apiKeySecretRef must be an uppercase environment variable name", "MODEL_SECRET_REF_INVALID");
+  if (!apiKeySecretRef || apiKeySecretRef.length > secretRefMaxLength) {
+    throw new ModelConfigurationError(`apiKeySecretRef must be 1-${secretRefMaxLength} characters`, "MODEL_SECRET_REF_INVALID");
   }
   if (!executionMode) {
     throw new ModelConfigurationError("executionMode must be mock or live", "MODEL_EXECUTION_INVALID");
@@ -100,17 +112,63 @@ export function validateModelConfiguration(input: unknown): EditableImageModelCo
   return { provider, model, baseUrl, apiKeySecretRef, executionMode, requestTimeoutMs };
 }
 
+function slugId(value: string) {
+  return value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
+}
+
+export function validateSelectableImageModels(input: unknown): EditableSelectableImageModel[] {
+  const record = typeof input === "object" && input !== null ? input as Record<string, unknown> : {};
+  const rawModels = Array.isArray(input) ? input : Array.isArray(record.models) ? record.models : [input];
+  const models = rawModels.map((raw, index) => {
+    const item = typeof raw === "object" && raw !== null ? raw as Record<string, unknown> : {};
+    const config = validateModelConfiguration(item);
+    const displayName = trimString(item.displayName) || config.model;
+    const id = slugId(trimString(item.id) || displayName || config.model) || `model-${index + 1}`;
+    return {
+      id,
+      displayName,
+      ...config,
+      enabled: item.enabled !== false,
+      isDefault: item.isDefault === true
+    };
+  });
+
+  const ids = new Set<string>();
+  for (const model of models) {
+    if (ids.has(model.id)) {
+      throw new ModelConfigurationError("model ids must be unique", "MODEL_ID_DUPLICATE");
+    }
+    ids.add(model.id);
+  }
+
+  const enabled = models.filter(model => model.enabled);
+  if (!enabled.length) {
+    throw new ModelConfigurationError("at least one model must be enabled", "MODEL_ENABLED_REQUIRED");
+  }
+  const defaults = models.filter(model => model.isDefault);
+  if (defaults.length !== 1) {
+    throw new ModelConfigurationError("exactly one default model is required", "MODEL_DEFAULT_REQUIRED");
+  }
+  if (!defaults[0].enabled) {
+    throw new ModelConfigurationError("default model must be enabled", "MODEL_DEFAULT_DISABLED");
+  }
+  return models;
+}
+
 function activeFromEnv(): ActiveImageModelConfigurationRecord {
   const envConfig = getEnvImageModelConfig();
   const now = new Date().toISOString();
   return {
     id: "active",
+    displayName: "Default Image Model",
     provider: String(envConfig.provider),
     model: envConfig.model,
     baseUrl: envConfig.baseUrl || "https://apihub.agnes-ai.com/v1",
     apiKeySecretRef: envConfig.apiKeySecretRef || "FLUXART_IMAGE_API_KEY",
     executionMode: envConfig.executionMode,
     requestTimeoutMs: envConfig.requestTimeoutMs,
+    enabled: true,
+    isDefault: true,
     lastTestStatus: "untested",
     createdAt: now,
     updatedAt: now
@@ -139,25 +197,30 @@ function sameEditableConfig(left: EditableImageModelConfiguration, right: Editab
 
 export async function getModelAdministrationState() {
   const repositories = getRepositories();
-  const active = await repositories.modelConfig.getActiveConfiguration();
+  const configured = await repositories.modelConfig.listConfigurations();
+  const fallback = activeFromEnv();
+  const configurations = configured.length ? configured : [fallback];
+  const active = configurations.find(model => model.enabled && model.isDefault) || configurations[0];
   return {
-    configuration: active || activeFromEnv(),
-    configurationSource: active ? "data" : "env",
+    configuration: active,
+    configurations,
+    configurationSource: configured.length ? "data" : "env",
     changes: await repositories.modelConfig.listConfigurationChanges(10),
     presets: modelConfigurationPresets
   };
 }
 
 export async function saveActiveModelConfiguration(input: unknown, changedByUserId: string) {
-  const config = validateModelConfiguration(input);
+  const models = validateSelectableImageModels(input);
   const repositories = getRepositories();
-  const result = await repositories.modelConfig.saveActiveConfiguration({
-    config,
+  const result = await repositories.modelConfig.saveConfigurations({
+    models,
     changedByUserId,
     changeType: "save"
   });
   return {
     ...result,
+    configuration: result.configurations.find(model => model.enabled && model.isDefault) || result.configurations[0],
     changes: await repositories.modelConfig.listConfigurationChanges(10)
   };
 }
@@ -168,8 +231,8 @@ export async function restoreModelConfiguration(changeId: string, changedByUserI
   if (!change) {
     throw new ModelConfigurationError("model configuration change was not found", "MODEL_CHANGE_NOT_FOUND", 404);
   }
-  const result = await repositories.modelConfig.saveActiveConfiguration({
-    config: change.afterConfig,
+  const result = await repositories.modelConfig.saveConfigurations({
+    models: change.afterConfig,
     changedByUserId,
     changeType: "restore",
     restoredFromChangeId: change.id,
@@ -178,6 +241,7 @@ export async function restoreModelConfiguration(changeId: string, changedByUserI
   });
   return {
     ...result,
+    configuration: result.configurations.find(model => model.enabled && model.isDefault) || result.configurations[0],
     changes: await repositories.modelConfig.listConfigurationChanges(10)
   };
 }

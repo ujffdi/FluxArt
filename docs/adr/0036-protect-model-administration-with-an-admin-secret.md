@@ -1,3 +1,3 @@
-# Protect model administration with an admin secret
+# Protect model administration with admin usernames and a secret
 
-FluxArt V1 will protect Model Administration with an authenticated user session plus a server-configured admin secret instead of adding a full role-based access control model. This keeps the lightweight operational page small while avoiding the unsafe default where any registered account can change the Active Image Model Configuration; a future multi-admin product can replace this boundary with user roles.
+FluxArt V1 will protect Model Administration with an authenticated user session whose username is in `FLUXART_ADMIN_USERNAMES`, defaulting to `tongsr`, while keeping `FLUXART_ADMIN_SECRET` as a backup access path for other authenticated operators. This keeps the lightweight operational page small without adding a full role-based access control model, while avoiding the unsafe default where any registered account can change the Active Image Model Configuration; a future multi-admin product can replace this boundary with user roles.

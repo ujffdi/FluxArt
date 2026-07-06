@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { getRequestSession } from "@/server/auth/request-auth";
 import { fail } from "@/server/shared/api-response";
+import { isModelAdminUsername } from "./admin-policy";
 
 function readSecretFromRequest(request: Request) {
   const authorization = request.headers.get("authorization") || "";
@@ -20,15 +21,21 @@ export async function requireAdminRequest(request: Request) {
   const session = await getRequestSession();
   if (!session) return { response: fail("authentication is required", 401, "AUTH_REQUIRED") };
 
+  if (isModelAdminUsername(session.account.username)) {
+    return { session };
+  }
+
   const configuredSecret = process.env.FLUXART_ADMIN_SECRET;
-  if (!configuredSecret) {
-    return { response: fail("admin secret is not configured", 503, "ADMIN_SECRET_NOT_CONFIGURED") };
-  }
-
   const requestSecret = readSecretFromRequest(request);
-  if (!requestSecret || !safeSecretEqual(requestSecret, configuredSecret)) {
-    return { response: fail("admin secret is invalid", 403, "ADMIN_SECRET_INVALID") };
+  if (configuredSecret && requestSecret && safeSecretEqual(requestSecret, configuredSecret)) {
+    return { session };
   }
 
-  return { session };
+  return {
+    response: fail(
+      configuredSecret ? "admin account or secret is required" : "account is not allowed for model administration",
+      403,
+      configuredSecret ? "ADMIN_SECRET_INVALID" : "ADMIN_ACCOUNT_NOT_ALLOWED"
+    )
+  };
 }

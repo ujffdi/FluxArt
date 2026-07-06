@@ -5,6 +5,7 @@ export interface AuthAccount {
   username: string;
   displayName: string;
   memberStatus: AccountEntitlement["memberStatus"];
+  isModelAdmin: boolean;
 }
 
 export interface AuthSession {

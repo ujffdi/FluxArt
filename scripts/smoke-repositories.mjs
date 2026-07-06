@@ -169,11 +169,14 @@ async function run() {
     ["tx.order.updateMany", "Prisma credit pack fulfillment should atomically claim orders before granting credits"],
     ["tx.creditBucket.create", "Prisma credit pack fulfillment should create purchased buckets in a transaction"],
     ["tx.creditLedgerEntry.create", "Prisma credit pack fulfillment should create ledger grants in a transaction"],
-    ["prisma.activeImageModelConfiguration.findUnique", "Prisma adapter should read the active image model configuration"],
-    ["tx.activeImageModelConfiguration.create", "Prisma adapter should create the active image model configuration"],
-    ["tx.activeImageModelConfiguration.update", "Prisma adapter should update the active image model configuration"],
-    ["tx.modelConfigurationChange.create", "Prisma adapter should create model configuration change records"],
-    ["prisma.modelConfigurationChange.findMany", "Prisma adapter should list model configuration change records"]
+    ["client.activeImageModelConfiguration?.findMany", "Prisma adapter should read selectable image model configurations through generated delegates"],
+    ["CREATE TABLE IF NOT EXISTS", "Prisma adapter should initialize missing model configuration tables before raw fallback queries"],
+    ["INSERT INTO active_image_model_configurations", "Prisma adapter should raw-fallback upsert the active image model configuration"],
+    ["UPDATE active_image_model_configurations", "Prisma adapter should raw-fallback update model test results"],
+    ["client.modelConfigurationChange.create", "Prisma adapter should create model configuration change records through generated delegates"],
+    ["INSERT INTO model_configuration_changes", "Prisma adapter should raw-fallback create model configuration change records"],
+    ["client.modelConfigurationChange.findMany", "Prisma adapter should list model configuration change records through generated delegates"],
+    ["FROM model_configuration_changes", "Prisma adapter should raw-fallback read model configuration change records"]
   ];
 
   for (const [snippet, message] of adapterSnippets) {

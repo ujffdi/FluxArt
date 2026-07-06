@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createEpayPaymentUrl, epayMerchantId, readEpayNotifyParams, verifyEpaySignature } from "@/server/billing/epay-adapter";
 import { billingPlans } from "@/server/billing/plans";
+import { creditValidUntilIso } from "@/server/credits/credit-validity";
 import { getRepositories } from "@/server/data/repositories";
 import type { BillingOrder, BillingPlanId } from "@/types/billing";
 
@@ -135,7 +136,7 @@ export async function handleEpayCreditPackNotify(input: URLSearchParams | Record
     originalAmount: plan.credits,
     remainingAmount: plan.credits,
     validFrom: now,
-    validUntil: new Date(Date.now() + 730 * 24 * 60 * 60 * 1000).toISOString(),
+    validUntil: creditValidUntilIso(new Date(now)),
     priority: 90,
     sourceOrderId: order.id,
     createdAt: now,

@@ -43,6 +43,11 @@ function matchesWhere(record: DbRecord, where?: Record<string, unknown>): boolea
       if (record[key] === (value as { not: unknown }).not) return false;
       continue;
     }
+    if (value && typeof value === "object" && "notIn" in value) {
+      const items = Array.isArray((value as { notIn: unknown }).notIn) ? (value as { notIn: unknown[] }).notIn : [];
+      if (items.includes(record[key])) return false;
+      continue;
+    }
     if (value && typeof value === "object" && !Array.isArray(value)) {
       if (!matchesWhere(record, value as Record<string, unknown>)) return false;
       continue;
@@ -184,10 +189,169 @@ async function run() {
     changeType: "save"
   });
   expect(savedModelConfig.configuration.model === "runtime-model", "Prisma adapter should save the active image model configuration");
-  expect(savedModelConfig.change.afterConfig.model === "runtime-model", "Prisma adapter should audit model configuration saves");
+  expect(savedModelConfig.change.afterConfig[0]?.model === "runtime-model", "Prisma adapter should audit model configuration saves");
   expect((await repositories.modelConfig.listConfigurationChanges(5)).length === 1, "Prisma adapter should list model configuration changes");
   const activeModelConfig = await repositories.modelConfig.getActiveConfiguration();
   expect(activeModelConfig?.requestTimeoutMs === 660000, "Prisma adapter should read the active image model configuration");
+
+  const rawActiveModelRows: DbRecord[] = [];
+  const rawModelChangeRows: DbRecord[] = [];
+  let rawActiveModelTableExists = false;
+  let rawModelChangeTableExists = false;
+  type TestingPrismaClient = Parameters<typeof setPrismaClientForTesting>[0];
+  function throwMissingRawTable(tableName: string): never {
+    const error = new Error(`Table 'flux_art.${tableName}' doesn't exist`);
+    (error as Error & { code?: string }).code = "1146";
+    throw error;
+  }
+  function assertMysqlIdentifierLengths(query: string) {
+    for (const match of query.matchAll(/`([^`]+)`/g)) {
+      const identifier = match[1];
+      if (identifier.length > 64) {
+        const error = new Error(`Identifier name '${identifier}' is too long`);
+        (error as Error & { code?: string }).code = "1059";
+        throw error;
+      }
+    }
+  }
+  const rawModelConfigClient = {
+    ...delegates,
+    activeImageModelConfiguration: undefined,
+    modelConfigurationChange: undefined,
+    async $transaction<T>(fn: (client: NonNullable<TestingPrismaClient>) => Promise<T>) {
+      return fn(rawModelConfigClient as NonNullable<TestingPrismaClient>);
+    },
+    async $executeRawUnsafe(query: string, ...values: unknown[]) {
+      if (query.includes("CREATE TABLE IF NOT EXISTS `active_image_model_configurations`")) {
+        assertMysqlIdentifierLengths(query);
+        rawActiveModelTableExists = true;
+        return 0;
+      }
+
+      if (query.includes("CREATE TABLE IF NOT EXISTS `model_configuration_changes`")) {
+        assertMysqlIdentifierLengths(query);
+        rawModelChangeTableExists = true;
+        return 0;
+      }
+
+      if (query.includes("INSERT INTO active_image_model_configurations")) {
+        if (!rawActiveModelTableExists) throwMissingRawTable("active_image_model_configurations");
+        const row: DbRecord = {
+          id: String(values[0]),
+          displayName: String(values[1]),
+          provider: String(values[2]),
+          modelName: String(values[3]),
+          baseUrl: String(values[4]),
+          apiKeySecretRef: String(values[5]),
+          executionMode: String(values[6]),
+          requestTimeoutMs: Number(values[7]),
+          enabled: Boolean(values[8]),
+          isDefault: Boolean(values[9]),
+          lastTestStatus: String(values[10]),
+          lastTestedAt: values[11] as RecordValue,
+          lastTestError: values[12] as RecordValue,
+          updatedByUserId: values[13] as RecordValue,
+          createdAt: values[14] as RecordValue,
+          updatedAt: values[15] as RecordValue
+        };
+        const existingIndex = rawActiveModelRows.findIndex(item => item.id === row.id);
+        if (existingIndex >= 0) rawActiveModelRows[existingIndex] = { ...rawActiveModelRows[existingIndex], ...row };
+        else rawActiveModelRows.unshift(row);
+        return 1;
+      }
+
+      if (query.includes("UPDATE active_image_model_configurations")) {
+        if (!rawActiveModelTableExists) throwMissingRawTable("active_image_model_configurations");
+        if (query.includes("SET enabled = false")) {
+          for (const row of rawActiveModelRows) {
+            if (!values.includes(row.id)) row.enabled = false;
+          }
+          return 1;
+        }
+        const row = rawActiveModelRows.find(item => item.id === String(values[5]));
+        if (!row) return 0;
+        row.lastTestStatus = String(values[0]);
+        row.lastTestedAt = values[1] as RecordValue;
+        row.lastTestError = values[2] as RecordValue;
+        row.updatedByUserId = values[3] as RecordValue;
+        row.updatedAt = values[4] as RecordValue;
+        return 1;
+      }
+
+      if (query.includes("INSERT INTO model_configuration_changes")) {
+        if (!rawModelChangeTableExists) throwMissingRawTable("model_configuration_changes");
+        rawModelChangeRows.unshift({
+          id: String(values[0]),
+          activeConfigurationId: String(values[1]),
+          changedByUserId: String(values[2]),
+          changeType: String(values[3]),
+          beforeConfigJson: values[4] as RecordValue,
+          afterConfigJson: values[5] as RecordValue,
+          testStatus: String(values[6]),
+          testError: values[7] as RecordValue,
+          restoredFromChangeId: values[8] as RecordValue,
+          createdAt: values[9] as RecordValue
+        });
+        return 1;
+      }
+
+      throw new Error(`unexpected raw execute query: ${query}`);
+    },
+    async $queryRawUnsafe(query: string, ...values: unknown[]) {
+      if (query.includes("FROM active_image_model_configurations")) {
+        if (!rawActiveModelTableExists) throwMissingRawTable("active_image_model_configurations");
+        if (query.includes("WHERE id = ?")) {
+          const record = rawActiveModelRows.find(item => item.id === String(values[0] || "active"));
+          return record ? [record] : [];
+        }
+        return rawActiveModelRows;
+      }
+
+      if (query.includes("FROM model_configuration_changes")) {
+        if (!rawModelChangeTableExists) throwMissingRawTable("model_configuration_changes");
+        if (query.includes("WHERE id = ?")) {
+          const record = rawModelChangeRows.find(item => item.id === String(values[0]));
+          return record ? [record] : [];
+        }
+        const limit = Number(query.match(/LIMIT\s+(\d+)/i)?.[1] || rawModelChangeRows.length);
+        return rawModelChangeRows
+          .filter(item => item.activeConfigurationId === String(values[0] || "active"))
+          .sort((left, right) => comparable(right.createdAt).localeCompare(comparable(left.createdAt)))
+          .slice(0, limit);
+      }
+
+      throw new Error(`unexpected raw query: ${query}`);
+    }
+  } as TestingPrismaClient;
+  setPrismaClientForTesting(rawModelConfigClient);
+  const rawFallbackRepositories = createPrismaRepositories();
+  const rawFallbackConfig = await rawFallbackRepositories.modelConfig.saveActiveConfiguration({
+    config: {
+      provider: "raw",
+      model: "raw-runtime-model",
+      baseUrl: "https://provider.example.test/raw/v1",
+      apiKeySecretRef: "provider.api-key",
+      executionMode: "live",
+      requestTimeoutMs: 450000
+    },
+    changedByUserId: userId,
+    changeType: "save",
+    testStatus: "passed"
+  });
+  expect(rawFallbackConfig.configuration.model === "raw-runtime-model", "Prisma adapter should raw-fallback save model configuration when generated delegates are stale");
+  expect(rawActiveModelTableExists && rawModelChangeTableExists, "Prisma adapter should initialize missing model configuration tables before raw-fallback queries");
+  expect(rawFallbackConfig.change.afterConfig[0]?.apiKeySecretRef === "provider.api-key", "Prisma adapter should parse raw JSON audit payloads");
+  expect((await rawFallbackRepositories.modelConfig.getActiveConfiguration())?.provider === "raw", "Prisma adapter should raw-fallback read active model configuration");
+  await rawFallbackRepositories.modelConfig.updateActiveConfigurationTestResult({
+    testStatus: "failed",
+    testedAt: now.toISOString(),
+    testError: "raw fallback test failure",
+    updatedByUserId: userId
+  });
+  expect((await rawFallbackRepositories.modelConfig.getActiveConfiguration())?.lastTestStatus === "failed", "Prisma adapter should raw-fallback update model test result");
+  expect((await rawFallbackRepositories.modelConfig.listConfigurationChanges(5)).length === 1, "Prisma adapter should raw-fallback list model configuration changes");
+  expect((await rawFallbackRepositories.modelConfig.getConfigurationChange(rawFallbackConfig.change.id))?.afterConfig[0]?.model === "raw-runtime-model", "Prisma adapter should raw-fallback read one model configuration change");
+  setPrismaClientForTesting(prismaClient);
 
   const registration = await repositories.auth.createRegistration({
     user: { username: "registered", displayName: "Registered User", memberStatus: "free" },
@@ -358,6 +522,11 @@ async function run() {
   const lowBalanceCredits = await getCreditsSummary(lowBalanceStore.users[0].id);
   expect(lowBalanceCredits.credits === 10, "credit service should lazily grant daily free credits on balance check");
   expect(lowBalanceCredits.recentChanges.some(entry => entry.label === "Daily Free Credit Grant"), "credit service should record a daily free grant ledger entry");
+  const dailyGrantBucket = lowBalanceStore.creditBuckets.find(bucket => bucket.sourceType === "daily_free");
+  expect(
+    dailyGrantBucket?.validUntil && Math.round((Date.parse(dailyGrantBucket.validUntil) - Date.parse(dailyGrantBucket.validFrom)) / 86400000) === 30,
+    "daily free credits should use a one-month validity window"
+  );
   const cappedDailyStore = createMockDataStore();
   const currentSmokeDate = new Date();
   cappedDailyStore.users[0].memberStatus = "free";
@@ -382,26 +551,48 @@ async function run() {
   setRepositoriesForTesting(undefined);
 
   const configuredModelStore = createMockDataStore();
-  configuredModelStore.activeImageModelConfiguration = {
+  configuredModelStore.activeImageModelConfigurations = [{
     id: "active",
+    displayName: "Runtime Task Model",
     provider: "custom",
     model: "runtime-task-model",
     baseUrl: "https://provider.example.test/v1",
     apiKeySecretRef: "RUNTIME_PROVIDER_KEY",
     executionMode: "mock",
     requestTimeoutMs: 660000,
+    enabled: true,
+    isDefault: true,
     lastTestStatus: "untested",
     createdAt: now.toISOString(),
     updatedAt: now.toISOString()
-  };
+  }, {
+    id: "premium-model",
+    displayName: "Premium Model",
+    provider: "custom",
+    model: "premium-task-model",
+    baseUrl: "https://provider.example.test/v1",
+    apiKeySecretRef: "RUNTIME_PROVIDER_KEY",
+    executionMode: "mock",
+    requestTimeoutMs: 660000,
+    enabled: true,
+    isDefault: false,
+    lastTestStatus: "untested",
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString()
+  }];
   configuredModelStore.creditBuckets[0].remainingAmount = 100;
   configuredModelStore.creditBuckets[0].originalAmount = 100;
   configuredModelStore.tasks = [];
   configuredModelStore.creditHolds = [];
   configuredModelStore.ledgerEntries = [];
   setRepositoriesForTesting(createMockRepositories(configuredModelStore));
-  const configuredTask = await createTask({ taskType: "t2i", prompt: "configured model", count: 1, size: "1024x1024" }, configuredModelStore.users[0].id);
-  expect(configuredTask.modelProvider === "custom" && configuredTask.modelName === "runtime-task-model", "task creation should snapshot the active image model configuration");
+  configuredModelStore.users[0].memberStatus = "free";
+  const freeConfiguredTask = await createTask({ taskType: "t2i", prompt: "configured model", count: 1, size: "1024x1024", selectedImageModelId: "premium-model" }, configuredModelStore.users[0].id);
+  expect(freeConfiguredTask.modelProvider === "custom" && freeConfiguredTask.modelName === "runtime-task-model", "free task creation should ignore selected models and snapshot the default image model");
+  configuredModelStore.users[0].memberStatus = "credit_pack";
+  configuredModelStore.creditBuckets[0].remainingAmount = 100;
+  const paidConfiguredTask = await createTask({ taskType: "t2i", prompt: "paid configured model", count: 1, size: "1024x1024", selectedImageModelId: "premium-model" }, configuredModelStore.users[0].id);
+  expect(paidConfiguredTask.modelProvider === "custom" && paidConfiguredTask.modelName === "premium-task-model", "credit pack task creation should snapshot the selected enabled image model");
   setRepositoriesForTesting(undefined);
 
   setRepositoriesForTesting(createMockRepositories(lowBalanceStore));
@@ -1148,7 +1339,7 @@ async function run() {
     originalAmount: 500,
     remainingAmount: 500,
     validFrom: now.toISOString(),
-    validUntil: new Date("2028-06-24T00:00:00.000Z").toISOString(),
+    validUntil: new Date("2026-07-24T00:00:00.000Z").toISOString(),
     priority: 90,
     sourceOrderId: fulfillOrder.orderId,
     createdAt: now.toISOString(),

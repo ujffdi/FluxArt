@@ -35,6 +35,17 @@ function validateSecret(value, name, options = {}) {
   }
 }
 
+function validateUsernameList(value, name) {
+  if (value === undefined) return undefined;
+  const usernames = value.split(",").map(username => username.trim()).filter(Boolean);
+  for (const username of usernames) {
+    if (!/^[a-zA-Z][a-zA-Z0-9_]{2,31}$/.test(username)) {
+      fail(`${name} contains invalid username ${username}`);
+    }
+  }
+  return usernames;
+}
+
 function validateMysqlUrl(value, name) {
   if (!value) return;
   try {
@@ -72,6 +83,7 @@ function run() {
   const mapayReturnUrl = process.env.MAPAY_RETURN_URL || process.env.EPAY_RETURN_URL;
   const sessionSecret = process.env.FLUXART_SESSION_SECRET;
   const adminSecret = process.env.FLUXART_ADMIN_SECRET;
+  const adminUsernames = process.env.FLUXART_ADMIN_USERNAMES;
   const testToolsEnabled = process.env.FLUXART_ENABLE_TEST_TOOLS === "1";
   const testToolsSecret = process.env.FLUXART_TEST_TOOLS_SECRET;
   const testToolsMaxCreditDelta = process.env.FLUXART_TEST_TOOLS_MAX_CREDIT_DELTA;
@@ -99,7 +111,6 @@ function run() {
   requireWhenProduction(process.env.MINIO_SECRET_KEY, "MINIO_SECRET_KEY", dataMode);
   requireWhenProduction(minioPublicBaseUrl, "MINIO_PUBLIC_BASE_URL", dataMode);
   requireWhenProduction(sessionSecret, "FLUXART_SESSION_SECRET", dataMode);
-  requireWhenProduction(adminSecret, "FLUXART_ADMIN_SECRET", dataMode);
   requireWhenProduction(mapayApiUrl, "MAPAY_API_URL", dataMode);
   requireWhenProduction(mapayMerchantId, "MAPAY_MERCHANT_ID", dataMode);
   requireWhenProduction(mapaySigningSecret, "MAPAY_SIGNING_SECRET", dataMode);
@@ -114,6 +125,7 @@ function run() {
   validateUrl(mapayReturnUrl, "MAPAY_RETURN_URL");
   validateSecret(sessionSecret, "FLUXART_SESSION_SECRET", { minLength: 32 });
   validateSecret(adminSecret, "FLUXART_ADMIN_SECRET", { minLength: 24 });
+  const configuredAdminUsernames = validateUsernameList(adminUsernames, "FLUXART_ADMIN_USERNAMES");
   validateSecret(process.env.MINIO_SECRET_KEY, "MINIO_SECRET_KEY", { minLength: 16 });
   validateSecret(mapaySigningSecret, "MAPAY_SIGNING_SECRET", { minLength: 16 });
   validateSecret(testToolsSecret, "FLUXART_TEST_TOOLS_SECRET", { minLength: 24 });
@@ -129,6 +141,9 @@ function run() {
   }
   if (testToolsMaxCreditDelta && (!Number.isInteger(Number(testToolsMaxCreditDelta)) || Number(testToolsMaxCreditDelta) <= 0)) {
     fail("FLUXART_TEST_TOOLS_MAX_CREDIT_DELTA must be a positive integer");
+  }
+  if (adminUsernames !== undefined && configuredAdminUsernames?.length === 0 && !adminSecret) {
+    fail("FLUXART_ADMIN_USERNAMES cannot be empty unless FLUXART_ADMIN_SECRET is configured");
   }
 
   if (executionMode === "live" && !process.env[apiKeySecretRef]) {
@@ -153,7 +168,8 @@ function run() {
   if (!minioEndpoint) warn("MINIO_ENDPOINT is not set; asset storage remains in local mock mode");
   if (!mapayApiUrl) warn("MAPAY_API_URL is not set; payment adapter remains in local mock mode");
   if (!sessionSecret) warn("FLUXART_SESSION_SECRET is not set; local session hashes use a development-only fallback");
-  if (!adminSecret) warn("FLUXART_ADMIN_SECRET is not set; model administration APIs remain locked");
+  if (adminUsernames === undefined) warn("FLUXART_ADMIN_USERNAMES is not set; model administration defaults to tongsr");
+  if (!adminSecret) warn("FLUXART_ADMIN_SECRET is not set; only admin usernames can access model administration");
 
   ok(`data=${dataMode || "mock"} execution=${executionMode || "mock"} provider=${provider} model=${model} baseUrl=${baseUrl} keyRef=${apiKeySecretRef}`);
 }

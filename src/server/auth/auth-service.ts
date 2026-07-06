@@ -1,5 +1,7 @@
 import { randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual, createHash } from "node:crypto";
 import { promisify } from "node:util";
+import { isModelAdminUsername } from "@/server/admin/admin-policy";
+import { creditValidUntilIso } from "@/server/credits/credit-validity";
 import { getRepositories } from "@/server/data/repositories";
 import type { AuthAccount, AuthResult, CurrentSessionResult } from "@/types/auth";
 
@@ -118,7 +120,8 @@ function toAuthAccount(input: { id: string; username: string; displayName: strin
     userId: input.id,
     username: input.username,
     displayName: input.displayName,
-    memberStatus: input.memberStatus
+    memberStatus: input.memberStatus,
+    isModelAdmin: isModelAdminUsername(input.username)
   };
 }
 
@@ -207,7 +210,7 @@ export async function registerSelfDeclaredAccount(input: {
       originalAmount: 50,
       remainingAmount: 50,
       validFrom: createdAt,
-      validUntil: iso(addMs(new Date(createdAt), sessionAbsoluteTtlMs)),
+      validUntil: creditValidUntilIso(new Date(createdAt)),
       priority: 10,
       createdAt,
       updatedAt: createdAt

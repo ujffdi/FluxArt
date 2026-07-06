@@ -27,7 +27,7 @@ CREATE TABLE `model_configuration_changes` (
   `restored_from_change_id` VARCHAR(191) NULL,
   `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   PRIMARY KEY (`id`),
-  KEY `model_configuration_changes_active_configuration_id_created_at_idx` (`active_configuration_id`, `created_at`),
-  KEY `model_configuration_changes_created_at_idx` (`created_at`),
+  KEY `model_config_changes_active_created_idx` (`active_configuration_id`, `created_at`),
+  KEY `model_config_changes_created_idx` (`created_at`),
   CONSTRAINT `model_configuration_changes_active_configuration_id_fkey` FOREIGN KEY (`active_configuration_id`) REFERENCES `active_image_model_configurations`(`id`)
 );

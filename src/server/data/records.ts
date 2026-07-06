@@ -1,6 +1,6 @@
 import type { BillingPlanId } from "@/types/billing";
 import type { AccountEntitlement, GenerationMode, ImageAsset, ImageGenerationTask, TaskStatus } from "@/types/image";
-import type { ActiveImageModelConfiguration, ModelConfigurationChange } from "@/types/model-config";
+import type { ModelConfigurationChange, SelectableImageModel } from "@/types/model-config";
 
 export type CreditBucketSourceType = "registration" | "daily_free" | "purchased" | "adjustment";
 export type CreditType = "promotional" | "purchased";
@@ -14,7 +14,7 @@ export type UploadKind = "source" | "mask";
 export type UploadValidationStatus = "accepted" | "rejected";
 export type DownloadType = "standard_watermarked" | "hd_no_watermark";
 
-export type ActiveImageModelConfigurationRecord = ActiveImageModelConfiguration;
+export type ActiveImageModelConfigurationRecord = SelectableImageModel;
 
 export type ModelConfigurationChangeRecord = ModelConfigurationChange;
 
@@ -24,6 +24,7 @@ export interface UserRecord {
   displayName: string;
   status: "active" | "disabled";
   memberStatus: AccountEntitlement["memberStatus"];
+  preferredImageModelId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -201,7 +202,7 @@ export interface AppDataStore {
   assets: ImageAsset[];
   downloads: DownloadEventRecord[];
   cleanupJobs: AssetCleanupJobRecord[];
-  activeImageModelConfiguration?: ActiveImageModelConfigurationRecord;
+  activeImageModelConfigurations: ActiveImageModelConfigurationRecord[];
   modelConfigurationChanges: ModelConfigurationChangeRecord[];
 }
 

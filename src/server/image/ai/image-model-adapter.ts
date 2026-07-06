@@ -4,6 +4,7 @@ import { getImageModelConfig, type ImageModelConfig } from "./model-config";
 
 export interface ImageModelGenerationInput extends CreateImageTaskInput {
   sourceImageUrl?: string;
+  modelConfig?: ImageModelConfig;
 }
 
 export interface ModelSubmission {
@@ -20,6 +21,7 @@ interface AsyncPollInput {
   provider: string;
   modelName: string;
   externalTaskId: string;
+  modelConfig?: ImageModelConfig;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -145,7 +147,7 @@ async function outputBytesFromPayload(payload: unknown, provider: string) {
 }
 
 export async function submitImageGeneration(input: ImageModelGenerationInput): Promise<ModelSubmission> {
-  const config = await getImageModelConfig();
+  const config = input.modelConfig || await getImageModelConfig();
   const provider = config.provider;
   const modelName = config.model;
   const timeoutMs = requestTimeoutMs(config);
@@ -200,7 +202,7 @@ export async function submitImageGeneration(input: ImageModelGenerationInput): P
 }
 
 export async function pollImageGenerationResult(input: AsyncPollInput): Promise<ModelSubmission> {
-  const config = await getImageModelConfig();
+  const config = input.modelConfig || await getImageModelConfig();
   const provider = config.provider;
   const modelName = config.model;
   const timeoutMs = requestTimeoutMs(config);

@@ -124,6 +124,7 @@ export interface AccountEntitlement {
   displayName: string;
   credits: number;
   memberStatus: "free" | "credit_pack";
+  preferredImageModelId?: string;
   canUseOutpaint: boolean;
   canDownloadHd: boolean;
   canDownloadWithoutWatermark: boolean;
@@ -157,6 +158,7 @@ export interface CreateImageTaskInput {
   stylePreset?: string;
   strength?: number;
   structureMode?: StructureMode;
+  selectedImageModelId?: string;
   modelProvider?: ImageProvider | string;
   modelName?: string;
 }

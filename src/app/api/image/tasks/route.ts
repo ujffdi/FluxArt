@@ -78,7 +78,8 @@ export async function POST(request: Request) {
       count: body.count || 4,
       stylePreset: body.stylePreset || "商业摄影",
       strength: body.strength,
-      structureMode: body.structureMode
+      structureMode: body.structureMode,
+      selectedImageModelId: typeof body.selectedImageModelId === "string" ? body.selectedImageModelId : undefined
     }, session.account.userId);
 
     return renewSessionCookie(ok({ task }), session.sessionToken, session.session);

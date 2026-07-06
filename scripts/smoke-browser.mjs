@@ -150,6 +150,7 @@ function startServerIfNeeded() {
     env: {
       ...process.env,
       FLUXART_DATA_MODE: process.env.FLUXART_DATA_MODE || "mock",
+      FLUXART_ADMIN_USERNAMES: process.env.FLUXART_ADMIN_USERNAMES || "tongsr",
       IMAGE_MODEL_EXECUTION: "mock"
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -206,6 +207,46 @@ async function run() {
     await page.getByText("游客模式").first().waitFor({ state: "attached", timeout: 10000 });
     await page.getByText("积分 0").first().waitFor({ state: "attached", timeout: 10000 });
     await page.getByText("未登录", { exact: true }).first().waitFor({ timeout: 10000 });
+
+    if (!explicitBaseUrl) {
+      const adminRegistrationPayload = await page.evaluate(async () => {
+        const response = await fetch("/api/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: "tongsr", displayName: "Admin Smoke", password: "admin-browser-password-1" })
+        });
+        return { status: response.status, body: await response.json() };
+      });
+      if (adminRegistrationPayload.status !== 200) fail(`register admin browser smoke account: expected HTTP 200, received ${adminRegistrationPayload.status}`);
+      if (adminRegistrationPayload.body?.data?.account?.isModelAdmin !== true) fail("tongsr auth payload should be marked as model admin");
+      await page.reload();
+      await page.getByText("已登录 · Admin Smoke").first().waitFor({ state: "attached", timeout: 10000 });
+      const adminNavLink = page.getByRole("link", { name: "模型后台" });
+      await adminNavLink.waitFor({ timeout: 10000 });
+      const adminLinkCount = await page.locator('a[href="/admin/model-config"]').count();
+      if (adminLinkCount !== 1) fail(`admin browser smoke should expose one model admin link, received ${adminLinkCount}`);
+      await adminNavLink.click();
+      await page.getByText("Selectable Image Models").waitFor({ timeout: 10000 });
+      const smokeModel = `smoke-model-${Date.now().toString(36)}`;
+      const smokeBaseUrl = "https://provider.example.test/smoke/v1";
+      const smokeSecretRef = "provider.api-key";
+      await page.getByLabel("Provider").selectOption("custom");
+      await page.getByLabel("Model").fill(smokeModel);
+      await page.getByLabel("Base URL").fill(smokeBaseUrl);
+      await page.getByLabel("Secret Ref").fill(smokeSecretRef);
+      const modelTestResponse = page.waitForResponse(response => response.url().includes("/api/admin/model-config/test") && response.request().method() === "POST");
+      await page.getByRole("button", { name: "测试" }).click();
+      const modelTest = await modelTestResponse;
+      if (modelTest.status() !== 200) fail(`admin model test request should return HTTP 200, received ${modelTest.status()}`);
+      await page.getByText("mock configuration accepted").waitFor({ timeout: 10000 });
+      if (await page.getByLabel("Model").inputValue() !== smokeModel) fail("admin model test should preserve the unsaved model input");
+      if (await page.getByLabel("Base URL").inputValue() !== smokeBaseUrl) fail("admin model test should preserve the unsaved base URL input");
+      if (await page.getByLabel("Secret Ref").inputValue() !== smokeSecretRef) fail("admin model test should preserve the unsaved secret ref input");
+      await page.goto(`${baseUrl}/workspace/account`);
+      await page.locator("header").getByRole("button", { name: "退出", exact: true }).click();
+      await page.getByRole("button", { name: "确认退出" }).click();
+      await page.getByText("游客模式").first().waitFor({ state: "attached", timeout: 10000 });
+    }
 
     const username = `browser_${Date.now().toString(36)}`;
     const registrationPayload = await page.evaluate(async username => {
@@ -282,7 +323,7 @@ async function run() {
     if (!generatedAsset) fail("browser smoke generated asset should appear in the asset list");
 
     await page.goto(`${baseUrl}/workspace/image`);
-    await page.getByText(taskId).waitFor({ timeout: 10000 });
+    await page.getByText(`已完成 · ${taskId}`).waitFor({ timeout: 10000 });
     await page.getByText("已生成 1 个结果，可在资产中心查看。").first().waitFor({ timeout: 10000 });
     await page.goto(`${baseUrl}/workspace/image/assets`);
     await page.getByText(generatedAsset.id).first().waitFor({ timeout: 10000 });
@@ -317,7 +358,7 @@ async function run() {
     if (!imageToImageAssetId) fail("run browser smoke image-to-image task: missing generated asset id");
 
     await page.goto(`${baseUrl}/workspace/image`);
-    await page.getByText(imageToImageTaskId).waitFor({ timeout: 10000 });
+    await page.getByText(`已完成 · ${imageToImageTaskId}`).waitFor({ timeout: 10000 });
     await page.getByText("已生成 1 个结果，可在资产中心查看。").first().waitFor({ timeout: 10000 });
 
     await page.goto(`${baseUrl}/workspace/image/assets`);

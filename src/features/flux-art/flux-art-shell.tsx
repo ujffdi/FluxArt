@@ -8,6 +8,7 @@ import {
   deleteImageAsset,
   createDownloadDecision,
   createImageTask,
+  getWorkspaceModelSelection,
   getAccountCredits,
   getCurrentAuthSession,
   listBillingOrders,
@@ -17,6 +18,8 @@ import {
   logoutCurrentSession,
   registerAccount,
   runImageTask,
+  savePreferredImageModel,
+  type WorkspaceModelSelection,
   uploadImageAsset
 } from "@/features/flux-art/api/image-workspace-client";
 import { toTaskType, type ProductPage, type SessionState, useImageWorkspaceStore } from "@/features/flux-art/stores/image-workspace-store";
@@ -36,12 +39,20 @@ import type {
   StructureMode
 } from "@/types/image";
 
-const navItems: Array<{ page: ProductPage; href: string; label: string }> = [
-  { page: "workspace", href: "/workspace/image", label: "生图工作台" },
-  { page: "assets", href: "/workspace/image/assets", label: "资产中心" },
-  { page: "account", href: "/workspace/account", label: "用户体系" },
-  { page: "billing", href: "/workspace/billing", label: "积分购买" }
+type NavItem = { id: string; page?: ProductPage; href: string; label: string };
+
+const navItems: NavItem[] = [
+  { id: "workspace", page: "workspace", href: "/workspace/image", label: "生图工作台" },
+  { id: "assets", page: "assets", href: "/workspace/image/assets", label: "资产中心" },
+  { id: "account", page: "account", href: "/workspace/account", label: "用户体系" },
+  { id: "billing", page: "billing", href: "/workspace/billing", label: "积分购买" }
 ];
+
+const modelAdminNavItem: NavItem = {
+  id: "model-admin",
+  href: "/admin/model-config",
+  label: "模型后台"
+};
 
 const taskTypeOptions: Array<{ value: "" | GenerationMode; label: string }> = [
   { value: "", label: "全部任务类型" },
@@ -173,7 +184,7 @@ function queueCardFromTask(task: ImageGenerationTask): QueueCard {
     id: task.id,
     title: `${taskStatusLabel(task)} · ${task.id}`,
     prompt: task.prompt,
-    code: `model=${task.modelProvider}/${task.modelName} · chargedCredits=${task.chargedCredits}`,
+    code: `task=${task.id} · chargedCredits=${task.chargedCredits}`,
     status: status.label,
     tone: status.tone,
     note: status.note
@@ -185,7 +196,7 @@ const demoQueueCards: QueueCard[] = [
     id: "task_9a21",
     title: "香蕉主图 · 2 张",
     prompt: "优化产品主体光影与背景留白",
-    code: "task_9a21 · model=gpt-image-2",
+    code: "task_9a21 · running",
     status: "生成中",
     tone: "wait",
     note: "服务端正在处理，完成后会更新结果区。"
@@ -279,6 +290,7 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
   const [serverTasks, setServerTasks] = useState<ImageGenerationTask[]>([]);
   const [creditsSummary, setCreditsSummary] = useState<AccountCreditsSummary | null>(null);
   const [billingOrders, setBillingOrders] = useState<BillingOrder[]>([]);
+  const [modelSelection, setModelSelection] = useState<WorkspaceModelSelection | null>(null);
   const [authAccount, setAuthAccount] = useState<AuthAccount | null>(null);
   const [sessionHydrated, setSessionHydrated] = useState(false);
   const [serverError, setServerError] = useState("");
@@ -290,6 +302,7 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
   const [customHeight, setCustomHeight] = useState(1024);
   const [stylePreset, setStylePreset] = useState(stylePresetOptions[0]);
   const reconciliationInFlight = useRef(false);
+  const modelFallbackNoticeRef = useRef("");
 
   const credits = creditsSummary?.credits ?? 0;
   const hasServerSession = authAccount !== null;
@@ -348,16 +361,18 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
     setSessionTasks([]);
     setCreditsSummary(null);
     setBillingOrders([]);
+    setModelSelection(null);
   }, []);
 
   const loadSessionOwnedState = useCallback(async function loadSessionOwnedState(account?: AuthAccount) {
     const auth = account ? { account } : await getCurrentAuthSession();
 
-    const [assetPayload, taskPayload, creditsPayload, ordersPayload] = await Promise.all([
+    const [assetPayload, taskPayload, creditsPayload, ordersPayload, modelPayload] = await Promise.all([
       listImageAssets({ page: 1, pageSize: 100 }),
       listImageTasks({ page: 1, pageSize: 20 }),
       getAccountCredits(),
-      listBillingOrders()
+      listBillingOrders(),
+      getWorkspaceModelSelection()
     ]);
 
     setServerAssets(assetPayload.assets);
@@ -365,6 +380,7 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
     setServerTasks(taskPayload.tasks);
     setCreditsSummary(creditsPayload);
     setBillingOrders(ordersPayload);
+    setModelSelection(modelPayload);
     setAuthAccount(auth.account);
     useImageWorkspaceStore.getState().setSessionState("logged-in");
     setServerError("");
@@ -426,6 +442,14 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
       window.clearInterval(timer);
     };
   }, [activeTaskIds, authAccount, hasServerSession, loadSessionOwnedState]);
+
+  useEffect(() => {
+    if (modelSelection?.fallbackReason !== "unavailable_preference") return;
+    const key = `${authAccount?.userId || "guest"}:${modelSelection.selectedImageModelId}`;
+    if (modelFallbackNoticeRef.current === key) return;
+    modelFallbackNoticeRef.current = key;
+    store.showToast("原模型不可用，已切换到默认模型");
+  }, [authAccount?.userId, modelSelection?.fallbackReason, modelSelection?.selectedImageModelId, store]);
 
   useEffect(() => {
     if (!store.toast) return;
@@ -522,15 +546,32 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
           count: store.generationCount,
           stylePreset,
           strength: imageMode ? store.referenceStrength : undefined,
-          structureMode: imageMode ? store.structureMode : undefined
+          structureMode: imageMode ? store.structureMode : undefined,
+          selectedImageModelId: modelSelection?.selectedImageModelId
         });
         upsertSessionTask(task);
-        store.showToast(`任务已提交：${task.modelProvider}/${task.modelName} · ${task.id}`);
+        store.showToast(`任务已提交：${task.id}`);
         if (task.status === "queued") startTaskRunner(task, "生成任务");
       } catch (error) {
         store.showToast(`任务提交失败：${workspaceErrorMessage(error, "请稍后重试")}`);
       }
     });
+  }
+
+  async function changeImageModel(modelId: string) {
+    if (!modelSelection?.eligible) {
+      store.showToast("购买积分后可选择更多模型");
+      window.history.pushState(null, "", "/workspace/billing");
+      return;
+    }
+
+    try {
+      const next = await savePreferredImageModel(modelId);
+      setModelSelection(next);
+      store.showToast("已保存默认生成模型");
+    } catch (error) {
+      store.showToast(`模型保存失败：${errorMessage(error, "请稍后重试")}`);
+    }
   }
 
   async function uploadAsset(file: File, options: { useAsSource?: boolean } = {}) {
@@ -645,6 +686,7 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
         activePage={activePage}
         sessionLabel={hasServerSession ? `已登录 · ${authAccount.displayName || "Flux Art 用户"}` : sessionState === "expired" ? "登录已过期" : "游客模式"}
         credits={credits}
+        showModelAdminLink={authAccount?.isModelAdmin === true}
         onAuthClick={() => (hasServerSession ? setShowLogout(true) : setAuthModal(""))}
       />
       {activePage === "workspace" && (
@@ -673,6 +715,8 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
           onCustomHeightChange={setCustomHeight}
           onGenerationCountChange={store.setGenerationCount}
           onStylePresetChange={setStylePreset}
+          modelSelection={modelSelection}
+          onModelChange={changeImageModel}
           onGenerate={createGenerationTask}
           onUploadAsset={file => uploadAsset(file, { useAsSource: true })}
           onDownload={openDownload}
@@ -734,13 +778,17 @@ function Header({
   activePage,
   sessionLabel,
   credits,
+  showModelAdminLink,
   onAuthClick
 }: {
   activePage: ProductPage;
   sessionLabel: string;
   credits: number;
+  showModelAdminLink: boolean;
   onAuthClick: () => void;
 }) {
+  const visibleNavItems = showModelAdminLink ? [...navItems, modelAdminNavItem] : navItems;
+
   return (
     <header className="top">
       <Link className="brand" href="/workspace/image">
@@ -748,8 +796,8 @@ function Header({
         <span>FluxArt</span>
       </Link>
       <nav className="nav" aria-label="产品导航">
-        {navItems.map(item => (
-          <Link key={item.page} className={activePage === item.page ? "active" : ""} href={item.href}>
+        {visibleNavItems.map(item => (
+          <Link key={item.id} className={item.page && activePage === item.page ? "active" : ""} href={item.href}>
             {item.label}
           </Link>
         ))}
@@ -793,6 +841,8 @@ function WorkspacePage({
   onCustomHeightChange,
   onGenerationCountChange,
   onStylePresetChange,
+  modelSelection,
+  onModelChange,
   onGenerate,
   onUploadAsset,
   onDownload,
@@ -829,6 +879,8 @@ function WorkspacePage({
   onCustomHeightChange: (height: number) => void;
   onGenerationCountChange: (count: number) => void;
   onStylePresetChange: (stylePreset: string) => void;
+  modelSelection: WorkspaceModelSelection | null;
+  onModelChange: (modelId: string) => void;
   onGenerate: () => void;
   onUploadAsset: (file: File) => Promise<void>;
   onDownload: (assetId?: string) => void;
@@ -848,7 +900,7 @@ function WorkspacePage({
         <aside className="panel input-panel">
           <div className="panel-head">
             <h2>创作输入</h2>
-            <span className="badge">gpt-image-2</span>
+            <span className="badge">AI 生成</span>
           </div>
           <div className="panel-body">
             <div className="mode mode-cards" role="tablist" aria-label="生成模式">
@@ -895,6 +947,28 @@ function WorkspacePage({
                 </div>
               </>
             )}
+            <div className="field">
+              <label>模型</label>
+              <select
+                className="select"
+                aria-label="模型"
+                disabled={!modelSelection || !modelSelection.eligible}
+                value={modelSelection?.selectedImageModelId || modelSelection?.defaultModel.id || ""}
+                onChange={event => onModelChange(event.target.value)}
+              >
+                {(modelSelection?.models || []).map(model => (
+                  <option key={model.id} value={model.id}>
+                    {model.displayName} · {model.model}
+                  </option>
+                ))}
+              </select>
+              {modelSelection && !modelSelection.eligible && (
+                <p className="small">购买积分后可选择更多模型；当前使用默认模型。<Link href="/workspace/billing">去购买积分</Link></p>
+              )}
+              {modelSelection?.fallbackReason === "unavailable_preference" && (
+                <p className="small">原模型不可用，已切换到默认模型。</p>
+              )}
+            </div>
             <div className="field">
               <label>风格预设 <span className="small">creative pink</span></label>
               <div className="chips">
@@ -1077,7 +1151,7 @@ function UploadField({ selectedAsset, onUploadAsset }: { selectedAsset?: ImageAs
           <span>{selectedAsset ? `已选择源图 ${selectedAsset.id}` : "未选择源图"}</span>
         </div>
         <strong>{selectedAsset ? selectedAsset.title : "请先从资产中心选择一张历史图片"}</strong>
-        <span className="small">{selectedAsset ? `${selectedAsset.width} x ${selectedAsset.height} · ${selectedAsset.modelProvider}/${selectedAsset.modelName}` : "图生图任务必须带 sourceAssetId，提交前会校验图片归属与状态。"}</span>
+        <span className="small">{selectedAsset ? `${selectedAsset.width} x ${selectedAsset.height} · ${assetSourceText(selectedAsset)}` : "图生图任务必须带 sourceAssetId，提交前会校验图片归属与状态。"}</span>
         <div className="chips">
           {selectedAsset && <span className="chip active">使用 {selectedAsset.id}</span>}
           <Link className="chip" href="/workspace/image/assets">从资产中心选择</Link>

@@ -11,8 +11,14 @@ export interface EditableImageModelConfiguration {
   requestTimeoutMs: number;
 }
 
-export interface ActiveImageModelConfiguration extends EditableImageModelConfiguration {
+export interface EditableSelectableImageModel extends EditableImageModelConfiguration {
   id: string;
+  displayName: string;
+  enabled: boolean;
+  isDefault: boolean;
+}
+
+export interface SelectableImageModel extends EditableSelectableImageModel {
   lastTestStatus: ModelConfigurationTestStatus;
   lastTestedAt?: string;
   lastTestError?: string;
@@ -21,12 +27,14 @@ export interface ActiveImageModelConfiguration extends EditableImageModelConfigu
   updatedAt: string;
 }
 
+export type ActiveImageModelConfiguration = SelectableImageModel;
+
 export interface ModelConfigurationChange {
   id: string;
   changedByUserId: string;
   changeType: ModelConfigurationChangeType;
-  beforeConfig?: EditableImageModelConfiguration;
-  afterConfig: EditableImageModelConfiguration;
+  beforeConfig?: EditableSelectableImageModel[];
+  afterConfig: EditableSelectableImageModel[];
   testStatus: ModelConfigurationTestStatus;
   testError?: string;
   restoredFromChangeId?: string;

@@ -16,6 +16,7 @@ const productionEnv = {
   FLUXART_DATA_MODE: "prisma",
   DATABASE_URL: "mysql://fluxart:strong-password@db.example.com:3306/fluxart",
   FLUXART_SESSION_SECRET: "0123456789abcdef0123456789abcdef",
+  FLUXART_ADMIN_USERNAMES: "tongsr",
   FLUXART_ADMIN_SECRET: "admin-secret-valid-for-env-smoke",
   MINIO_ENDPOINT: "https://minio.example.com",
   MINIO_PUBLIC_BASE_URL: "https://cdn.example.com/fluxart",
@@ -41,8 +42,11 @@ expect(production.status === 0, `production env should pass: ${production.stderr
 const missingSessionSecret = runCheck({ ...productionEnv, FLUXART_SESSION_SECRET: "" });
 expect(missingSessionSecret.status !== 0 && missingSessionSecret.stderr.includes("FLUXART_SESSION_SECRET"), "missing session secret should fail production env validation");
 
-const missingAdminSecret = runCheck({ ...productionEnv, FLUXART_ADMIN_SECRET: "" });
-expect(missingAdminSecret.status !== 0 && missingAdminSecret.stderr.includes("FLUXART_ADMIN_SECRET"), "missing admin secret should fail production env validation");
+const usernameOnlyAdmin = runCheck({ ...productionEnv, FLUXART_ADMIN_SECRET: "" });
+expect(usernameOnlyAdmin.status === 0, `admin username allowlist without admin secret should pass: ${usernameOnlyAdmin.stderr || usernameOnlyAdmin.stdout}`);
+
+const emptyAdminUsernames = runCheck({ ...productionEnv, FLUXART_ADMIN_USERNAMES: "", FLUXART_ADMIN_SECRET: "" });
+expect(emptyAdminUsernames.status !== 0 && emptyAdminUsernames.stderr.includes("FLUXART_ADMIN_USERNAMES"), "empty admin username allowlist should fail env validation");
 
 const placeholderMapaySecret = runCheck({ ...productionEnv, MAPAY_SIGNING_SECRET: "secret" });
 expect(placeholderMapaySecret.status !== 0 && placeholderMapaySecret.stderr.includes("MAPAY_SIGNING_SECRET"), "placeholder MaPay secret should fail env validation");

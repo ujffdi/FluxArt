@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { creditValidUntilIso } from "@/server/credits/credit-validity";
 import { getRepositories } from "@/server/data/repositories";
 import { localTestToolsEnabled } from "@/server/dev/local-test-tools-runtime";
 import type { CreateImageTaskInput, GenerationMode } from "@/types/image";
@@ -35,14 +36,6 @@ function iso(date: Date) {
 
 function dayKey(date = new Date()) {
   return date.toISOString().slice(0, 10);
-}
-
-function addDays(date: Date, days: number) {
-  return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
-}
-
-function endOfUtcDay(date = new Date()) {
-  return new Date(`${dayKey(date)}T23:59:59.999Z`);
 }
 
 function normalizeUsername(username: string) {
@@ -105,7 +98,7 @@ export async function grantDailyFreeCreditsIfNeeded(userId: string) {
     originalAmount: grantAmount,
     remainingAmount: grantAmount,
     validFrom: now,
-    validUntil: iso(endOfUtcDay(addDays(nowDate, 2))),
+    validUntil: creditValidUntilIso(nowDate),
     priority: 5,
     createdAt: now,
     updatedAt: now
