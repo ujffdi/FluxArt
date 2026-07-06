@@ -132,6 +132,13 @@ function expectNoServerModelConfig(task, label) {
   expect(payload.modelRequestTimeoutMs === undefined, `${label} should not expose model timeout in task payload`);
 }
 
+function expectUserSafeModel(model, label) {
+  expect(model && model.baseUrl === undefined, `${label} should not expose model baseUrl`);
+  expect(model && model.apiKeySecretRef === undefined, `${label} should not expose model secret reference`);
+  expect(model && model.executionMode === undefined, `${label} should not expose model execution mode`);
+  expect(model && model.requestTimeoutMs === undefined, `${label} should not expose model timeout`);
+}
+
 function signEpayParams(params, secret = "mock-epay-secret") {
   const query = Object.entries(params)
     .filter(([key, value]) => key !== "sign" && key !== "sign_type" && value !== "")
@@ -525,6 +532,8 @@ async function runSmoke() {
     expect(freeModelSelection.body.data.modelSelection.eligible === false, "free users should not be model-selection eligible");
     expect(freeModelSelection.body.data.modelSelection.selectedImageModelId === "agnes-image-2-1-flash", "free users should see the default model selected");
     expect(freeModelSelection.body.data.modelSelection.models.length === 1, "free users should only receive the default model option");
+    expectUserSafeModel(freeModelSelection.body.data.modelSelection.defaultModel, "free default model selection state");
+    expectUserSafeModel(freeModelSelection.body.data.modelSelection.models[0], "free model selection option");
 
     const freePreferred = await request("/api/account/preferred-model", {
       method: "POST",
@@ -788,6 +797,10 @@ async function runSmoke() {
     expectStatus(paidModelSelection, 200, "credit pack model selection state");
     expect(paidModelSelection.body.data.modelSelection.eligible === true, "credit pack users should be model-selection eligible");
     expect(paidModelSelection.body.data.modelSelection.models.some(model => model.id === "premium-model"), "credit pack users should receive enabled selectable models");
+    expectUserSafeModel(paidModelSelection.body.data.modelSelection.defaultModel, "paid default model selection state");
+    for (const model of paidModelSelection.body.data.modelSelection.models) {
+      expectUserSafeModel(model, `paid model selection option ${model.id}`);
+    }
 
     const savedPreferredModel = await request("/api/account/preferred-model", {
       method: "POST",

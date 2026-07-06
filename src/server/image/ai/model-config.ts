@@ -14,12 +14,14 @@ export interface ImageModelConfig {
 
 export interface UserModelSelectionState {
   eligible: boolean;
-  defaultModel: SelectableImageModel;
+  defaultModel: UserSafeSelectableImageModel;
   models: Array<Pick<SelectableImageModel, "id" | "displayName" | "provider" | "model" | "enabled" | "isDefault">>;
   preferredImageModelId?: string;
   selectedImageModelId: string;
   fallbackReason?: "not_eligible" | "missing_preference" | "unavailable_preference" | "unavailable_selection";
 }
+
+type UserSafeSelectableImageModel = Pick<SelectableImageModel, "id" | "displayName" | "provider" | "model" | "enabled" | "isDefault">;
 
 function envRequestTimeoutMs() {
   const configured = Number(process.env.IMAGE_MODEL_REQUEST_TIMEOUT_MS);
@@ -86,6 +88,11 @@ function toModelConfig(model: SelectableImageModel): ImageModelConfig {
   };
 }
 
+function toUserSafeModel(model: SelectableImageModel): UserSafeSelectableImageModel {
+  const { id, displayName, provider, model: modelName, enabled, isDefault } = model;
+  return { id, displayName, provider, model: modelName, enabled, isDefault };
+}
+
 export async function getUserModelSelectionState(account: Pick<AccountEntitlement, "memberStatus" | "preferredImageModelId">, selectedImageModelId?: string): Promise<UserModelSelectionState> {
   const models = await listSelectableImageModels();
   const enabledModels = models.filter(model => model.enabled);
@@ -107,10 +114,10 @@ export async function getUserModelSelectionState(account: Pick<AccountEntitlemen
 
   return {
     eligible,
-    defaultModel,
+    defaultModel: toUserSafeModel(defaultModel),
     models: eligible
-      ? enabledModels.map(({ id, displayName, provider, model, enabled, isDefault }) => ({ id, displayName, provider, model, enabled, isDefault }))
-      : [{ id: defaultModel.id, displayName: defaultModel.displayName, provider: defaultModel.provider, model: defaultModel.model, enabled: defaultModel.enabled, isDefault: defaultModel.isDefault }],
+      ? enabledModels.map(toUserSafeModel)
+      : [toUserSafeModel(defaultModel)],
     preferredImageModelId: eligible ? account.preferredImageModelId : undefined,
     selectedImageModelId: selected.id,
     fallbackReason

@@ -213,6 +213,7 @@ async function run() {
   const rawModelChangeRows: DbRecord[] = [];
   let rawActiveModelTableExists = false;
   let rawModelChangeTableExists = false;
+  const rawActiveModelColumns = new Set(["id", "provider", "model_name", "base_url", "api_key_secret_ref", "execution_mode", "request_timeout_ms", "last_test_status", "last_tested_at", "last_test_error", "updated_by_user_id", "created_at", "updated_at"]);
   type TestingPrismaClient = Parameters<typeof setPrismaClientForTesting>[0];
   function throwMissingRawTable(tableName: string): never {
     const error = new Error(`Table 'flux_art.${tableName}' doesn't exist`);
@@ -239,7 +240,20 @@ async function run() {
     async $executeRawUnsafe(query: string, ...values: unknown[]) {
       if (query.includes("CREATE TABLE IF NOT EXISTS `active_image_model_configurations`")) {
         assertMysqlIdentifierLengths(query);
+        const alreadyExists = rawActiveModelTableExists;
         rawActiveModelTableExists = true;
+        if (!alreadyExists) {
+          rawActiveModelColumns.add("display_name");
+          rawActiveModelColumns.add("enabled");
+          rawActiveModelColumns.add("is_default");
+        }
+        return 0;
+      }
+
+      if (query.includes("ALTER TABLE active_image_model_configurations ADD COLUMN")) {
+        if (!rawActiveModelTableExists) throwMissingRawTable("active_image_model_configurations");
+        const column = query.match(/ADD COLUMN `([^`]+)`/)?.[1];
+        if (column) rawActiveModelColumns.add(column);
         return 0;
       }
 
@@ -283,6 +297,15 @@ async function run() {
           }
           return 1;
         }
+        if (query.includes("SET display_name =")) {
+          const row = rawActiveModelRows.find(item => item.id === "active");
+          if (row) {
+            row.displayName = row.displayName || "Default Image Model";
+            row.enabled = true;
+            row.isDefault = true;
+          }
+          return row ? 1 : 0;
+        }
         const row = rawActiveModelRows.find(item => item.id === String(values[5]));
         if (!row) return 0;
         row.lastTestStatus = String(values[0]);
@@ -313,6 +336,12 @@ async function run() {
       throw new Error(`unexpected raw execute query: ${query}`);
     },
     async $queryRawUnsafe(query: string, ...values: unknown[]) {
+      if (query.includes("FROM INFORMATION_SCHEMA.COLUMNS")) {
+        const tableName = String(values[0] || "");
+        if (tableName !== "active_image_model_configurations" || !rawActiveModelTableExists) return [];
+        return [...rawActiveModelColumns].map(columnName => ({ columnName }));
+      }
+
       if (query.includes("FROM active_image_model_configurations")) {
         if (!rawActiveModelTableExists) throwMissingRawTable("active_image_model_configurations");
         if (query.includes("WHERE id = ?")) {

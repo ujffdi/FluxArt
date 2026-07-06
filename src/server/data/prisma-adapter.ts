@@ -399,6 +399,12 @@ const createModelConfigurationChangesTableSql = `
   )
 `;
 
+const activeModelConfigurationColumnDefinitions: Record<string, string> = {
+  display_name: "`display_name` VARCHAR(120) NOT NULL DEFAULT 'Default Image Model' AFTER `id`",
+  enabled: "`enabled` BOOLEAN NOT NULL DEFAULT true AFTER `request_timeout_ms`",
+  is_default: "`is_default` BOOLEAN NOT NULL DEFAULT false AFTER `enabled`"
+};
+
 function requireModelConfigRawSql(client: PrismaClientLike): RawSqlPrismaClient {
   if (!client.$executeRawUnsafe || !client.$queryRawUnsafe) {
     throw new Error("Prisma client does not expose model configuration delegates or raw SQL support. Run `npx prisma generate` after applying the latest schema.");
@@ -406,9 +412,50 @@ function requireModelConfigRawSql(client: PrismaClientLike): RawSqlPrismaClient 
   return client as RawSqlPrismaClient;
 }
 
+function isDbRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function hasDatabaseErrorCode(error: unknown, code: string) {
+  if (!isDbRecord(error)) return false;
+  return error.code === code || error.errno === code || (typeof error.message === "string" && error.message.includes(`Code: \`${code}\``));
+}
+
+async function ensureActiveModelConfigurationColumns(client: RawSqlPrismaClient) {
+  const rows = await client.$queryRawUnsafe(
+    `SELECT COLUMN_NAME AS columnName
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?`,
+    "active_image_model_configurations"
+  );
+  const columns = new Set((Array.isArray(rows) ? rows : []).map(row => {
+    const record = isDbRecord(row) ? row : {};
+    return asString(record.columnName || record.COLUMN_NAME);
+  }).filter(Boolean));
+
+  for (const [columnName, definition] of Object.entries(activeModelConfigurationColumnDefinitions)) {
+    if (columns.has(columnName)) continue;
+    try {
+      await client.$executeRawUnsafe(`ALTER TABLE active_image_model_configurations ADD COLUMN ${definition}`);
+    } catch (error) {
+      if (!hasDatabaseErrorCode(error, "1060")) throw error;
+    }
+  }
+
+  await client.$executeRawUnsafe(
+    `UPDATE active_image_model_configurations
+     SET display_name = COALESCE(NULLIF(display_name, ''), 'Default Image Model'),
+         enabled = true,
+         is_default = true
+     WHERE id = 'active'`
+  );
+}
+
 async function ensureModelConfigTables(client: RawSqlPrismaClient) {
   if (modelConfigTablesEnsured) return;
   await client.$executeRawUnsafe(createActiveModelConfigurationTableSql);
+  await ensureActiveModelConfigurationColumns(client);
   await client.$executeRawUnsafe(createModelConfigurationChangesTableSql);
   modelConfigTablesEnsured = true;
 }
