@@ -7,8 +7,8 @@ Create image tasks only after permissions, concurrency, and credit holds pass, t
 ## Acceptance criteria
 
 - [ ] Task creation enforces tier capabilities for Text-to-Image, Image-to-Image, Inpainting, and Outpainting.
-- [ ] Task creation enforces running task limits: Free User 1, Credit Pack User 2, Pro Member 4.
-- [ ] Task creation stores task priority: Free User 10, Credit Pack User 50, Pro Member 100.
+- [ ] Task creation enforces running task limits: Free User 1, Credit Pack User 4.
+- [ ] Task creation stores task priority: Free User 10, Credit Pack User 50.
 - [ ] Credits are held before a task is created and converted to final spend only after approved Usable Output.
 - [ ] System failures and output review failures release or refund the hold.
 - [ ] Tasks use only the V1 states: queued, running, storing, reviewing, succeeded, failed, refunded.

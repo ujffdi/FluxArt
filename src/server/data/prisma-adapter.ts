@@ -32,8 +32,6 @@ interface PrismaClientLike {
   creditHold: PrismaDelegate;
   order: PrismaDelegate;
   paymentNotification: PrismaDelegate;
-  membershipPlan: PrismaDelegate;
-  membershipCycle: PrismaDelegate;
   imageUpload: PrismaDelegate;
   imageTask: PrismaDelegate;
   providerSubmission: PrismaDelegate;
@@ -108,7 +106,7 @@ function entitlementSnapshotFromRecord(value: RecordValue | undefined): ImageAss
   const snapshot = asJsonObject(value);
   const memberStatus = snapshot.memberStatus;
   if (
-    (memberStatus !== "free" && memberStatus !== "credit_pack" && memberStatus !== "pro_trial" && memberStatus !== "pro") ||
+    (memberStatus !== "free" && memberStatus !== "credit_pack") ||
     typeof snapshot.capturedAt !== "string" ||
     typeof snapshot.canDownloadHd !== "boolean" ||
     typeof snapshot.canDownloadWithoutWatermark !== "boolean"
@@ -120,14 +118,12 @@ function entitlementSnapshotFromRecord(value: RecordValue | undefined): ImageAss
     memberStatus,
     capturedAt: snapshot.capturedAt,
     canDownloadHd: snapshot.canDownloadHd,
-    canDownloadWithoutWatermark: snapshot.canDownloadWithoutWatermark,
-    commercialAuthorizationStatement: typeof snapshot.commercialAuthorizationStatement === "string" ? snapshot.commercialAuthorizationStatement : undefined
+    canDownloadWithoutWatermark: snapshot.canDownloadWithoutWatermark
   };
 }
 
-function accountFromUser(user: DbRecord, credits: number, username: string, activeCycle?: DbRecord): AccountEntitlement {
-  const memberStatus = activeCycle ? "pro" : asString(user.memberStatus, "free") as AccountEntitlement["memberStatus"];
-  const cycleEnd = activeCycle?.cycleEnd;
+function accountFromUser(user: DbRecord, credits: number, username: string): AccountEntitlement {
+  const memberStatus = asString(user.memberStatus, "free") as AccountEntitlement["memberStatus"];
 
   return {
     userId: asString(user.id),
@@ -135,12 +131,9 @@ function accountFromUser(user: DbRecord, credits: number, username: string, acti
     displayName: asString(user.displayName, "FluxArt User"),
     credits,
     memberStatus,
-    proDaysRemaining: typeof cycleEnd === "string" || cycleEnd instanceof Date
-      ? Math.max(0, Math.ceil((Date.parse(toIso(cycleEnd)) - Date.now()) / 86400000))
-      : 0,
-    canUseOutpaint: memberStatus === "pro" || memberStatus === "pro_trial",
-    canDownloadHd: memberStatus === "pro" || memberStatus === "pro_trial",
-    canDownloadWithoutWatermark: memberStatus === "pro" || memberStatus === "pro_trial"
+    canUseOutpaint: memberStatus === "credit_pack",
+    canDownloadHd: memberStatus === "credit_pack",
+    canDownloadWithoutWatermark: memberStatus === "credit_pack"
   };
 }
 
@@ -171,7 +164,6 @@ function assetFromRecord(record: DbRecord): ImageAsset {
     modelProvider: asString(record.modelProvider),
     modelName: asString(record.modelName),
     entitlementSnapshot: entitlementSnapshotFromRecord(record.entitlementSnapshotJson),
-    commercialAuthorizationStatement: asString(record.commercialAuthorizationStatement) || undefined,
     deletedAt,
     createdAt: toIso(record.createdAt)
   };
@@ -223,7 +215,7 @@ function bucketFromRecord(record: DbRecord): Awaited<ReturnType<AppRepositories[
   return {
     id: asString(record.id),
     userId: asString(record.userId),
-    sourceType: asString(record.sourceType, "adjustment") as "registration" | "daily_free" | "purchased" | "membership" | "adjustment",
+    sourceType: asString(record.sourceType, "adjustment") as "registration" | "daily_free" | "purchased" | "adjustment",
     creditType: asString(record.creditType, "promotional") as "promotional" | "purchased",
     originalAmount: asNumber(record.originalAmount),
     remainingAmount: asNumber(record.remainingAmount),
@@ -231,7 +223,6 @@ function bucketFromRecord(record: DbRecord): Awaited<ReturnType<AppRepositories[
     validUntil: record.validUntil ? toIso(record.validUntil) : undefined,
     priority: asNumber(record.priority),
     sourceOrderId: asString(record.sourceOrderId) || undefined,
-    membershipCycleId: asString(record.membershipCycleId) || undefined,
     createdAt: toIso(record.createdAt),
     updatedAt: toIso(record.updatedAt)
   };
@@ -341,8 +332,7 @@ export function createPrismaRepositories(): AppRepositories {
             modelProvider: String(asset.modelProvider),
             modelName: asset.modelName,
             sourceAssetId: asset.sourceAssetId || null,
-            entitlementSnapshotJson: asset.entitlementSnapshot || undefined,
-            commercialAuthorizationStatement: asset.commercialAuthorizationStatement || null
+            entitlementSnapshotJson: asset.entitlementSnapshot || undefined
           }
         });
         return assetFromRecord(record);
@@ -539,11 +529,7 @@ export function createPrismaRepositories(): AppRepositories {
         const credits = buckets
           .filter(bucket => toIso(bucket.validFrom) <= nowIso && (!bucket.validUntil || toIso(bucket.validUntil) > nowIso))
           .reduce((sum, bucket) => sum + asNumber(bucket.remainingAmount), 0);
-        const activeCycle = await prisma.membershipCycle.findFirst?.({
-          where: { userId: asString(user.id), status: "active", cycleStart: { lte: new Date() }, cycleEnd: { gt: new Date() } },
-          orderBy: { cycleEnd: "desc" }
-        });
-        return accountFromUser(user, credits, asString(credential?.username), activeCycle || undefined);
+        return accountFromUser(user, credits, asString(credential?.username));
       },
       async getUserById(userId) {
         const prisma = await getPrismaClient();
@@ -941,7 +927,7 @@ export function createPrismaRepositories(): AppRepositories {
               `SELECT id, user_id AS userId, source_type AS sourceType, credit_type AS creditType,
                       original_amount AS originalAmount, remaining_amount AS remainingAmount,
                       valid_from AS validFrom, valid_until AS validUntil, priority,
-                      source_order_id AS sourceOrderId, membership_cycle_id AS membershipCycleId,
+                      source_order_id AS sourceOrderId,
                       created_at AS createdAt, updated_at AS updatedAt
                FROM credit_buckets
                WHERE user_id = ? AND remaining_amount > 0 AND valid_from <= ? AND (valid_until IS NULL OR valid_until > ?)
@@ -1277,7 +1263,7 @@ export function createPrismaRepositories(): AppRepositories {
               `SELECT id, user_id AS userId, source_type AS sourceType, credit_type AS creditType,
                       original_amount AS originalAmount, remaining_amount AS remainingAmount,
                       valid_from AS validFrom, valid_until AS validUntil, priority,
-                      source_order_id AS sourceOrderId, membership_cycle_id AS membershipCycleId,
+                      source_order_id AS sourceOrderId,
                       created_at AS createdAt, updated_at AS updatedAt
                FROM credit_buckets
                WHERE user_id = ? AND remaining_amount > 0 AND valid_from <= ? AND (valid_until IS NULL OR valid_until > ?)
@@ -1601,211 +1587,6 @@ export function createPrismaRepositories(): AppRepositories {
           };
         });
       },
-      async fulfillMembershipOrder(input) {
-        const prisma = await getPrismaClient();
-        return runTransaction(prisma, async tx => {
-          const existingNotification = await tx.paymentNotification.findFirst?.({
-            where: { orderId: input.order.id }
-          });
-          const orderRecord = await tx.order.findUnique?.({ where: { id: input.order.id } });
-          if (!orderRecord) throw new Error("ORDER_NOT_FOUND");
-          const orderStatus = asString(orderRecord.fulfillmentStatus, "pending");
-          if (existingNotification || orderStatus === "fulfilled") {
-            return {
-              order: {
-                id: asString(orderRecord.id),
-                userId: asString(orderRecord.userId),
-                planId: asString(orderRecord.planId, "pro-monthly") as BillingOrder["planId"],
-                amountCents: asNumber(orderRecord.amountCents),
-                currency: "CNY" as const,
-                provider: "epay" as const,
-                outTradeNo: asString(orderRecord.outTradeNo),
-                status: asString(orderRecord.status, "pending_payment") as "pending_payment" | "paid" | "failed" | "refunded",
-                fulfillmentStatus: asString(orderRecord.fulfillmentStatus, "pending") as "pending" | "fulfilled" | "failed" | "retryable",
-                paymentUrl: asString(orderRecord.paymentUrl) || undefined,
-                paidAt: orderRecord.paidAt ? toIso(orderRecord.paidAt) : undefined,
-                createdAt: toIso(orderRecord.createdAt),
-                updatedAt: toIso(orderRecord.updatedAt)
-              },
-              notification: existingNotification ? {
-                id: asString(existingNotification.id),
-                orderId: asString(existingNotification.orderId),
-                providerTradeNo: asString(existingNotification.providerTradeNo) || undefined,
-                verified: existingNotification.verified === true,
-                rawPayloadDigest: asString(existingNotification.rawPayloadDigest),
-                failureReason: asString(existingNotification.failureReason) || undefined,
-                receivedAt: toIso(existingNotification.receivedAt),
-                processedAt: existingNotification.processedAt ? toIso(existingNotification.processedAt) : undefined
-              } : input.notification,
-              duplicated: true
-            };
-          }
-
-          const claimResult = await tx.order.updateMany?.({
-            where: { id: input.order.id, fulfillmentStatus: { not: "fulfilled" } },
-            data: {
-              status: "paid",
-              fulfillmentStatus: "fulfilled",
-              paidAt: input.paidAt,
-              updatedAt: input.paidAt
-            }
-          });
-          if (claimResult && claimResult.count === 0) {
-            const claimedOrder = await tx.order.findUnique?.({ where: { id: input.order.id } });
-            return {
-              order: {
-                id: asString(claimedOrder?.id || input.order.id),
-                userId: asString(claimedOrder?.userId || input.order.userId),
-                planId: asString(claimedOrder?.planId || input.order.planId, "pro-monthly") as BillingOrder["planId"],
-                amountCents: asNumber(claimedOrder?.amountCents || input.order.amountCents),
-                currency: "CNY" as const,
-                provider: "epay" as const,
-                outTradeNo: asString(claimedOrder?.outTradeNo || input.order.outTradeNo),
-                status: asString(claimedOrder?.status || input.order.status, "paid") as "pending_payment" | "paid" | "failed" | "refunded",
-                fulfillmentStatus: asString(claimedOrder?.fulfillmentStatus || input.order.fulfillmentStatus, "fulfilled") as "pending" | "fulfilled" | "failed" | "retryable",
-                paymentUrl: asString(claimedOrder?.paymentUrl || input.order.paymentUrl) || undefined,
-                paidAt: claimedOrder?.paidAt ? toIso(claimedOrder.paidAt) : input.order.paidAt,
-                createdAt: claimedOrder?.createdAt ? toIso(claimedOrder.createdAt) : input.order.createdAt,
-                updatedAt: claimedOrder?.updatedAt ? toIso(claimedOrder.updatedAt) : input.order.updatedAt
-              },
-              notification: input.notification,
-              duplicated: true
-            };
-          }
-
-          const plan = await tx.membershipPlan.findUnique?.({ where: { code: input.cycle.planCode } });
-          if (!plan) throw new Error("MEMBERSHIP_PLAN_NOT_FOUND");
-          await tx.paymentNotification.create({ data: input.notification });
-          await tx.membershipCycle.create({
-            data: {
-              id: input.cycle.id,
-              userId: input.cycle.userId,
-              planId: asString(plan.id),
-              orderId: input.cycle.orderId,
-              cycleStart: input.cycle.cycleStart,
-              cycleEnd: input.cycle.cycleEnd,
-              status: input.cycle.status,
-              hdDownloadsUsed: input.cycle.hdDownloadsUsed,
-              hdFairUseCap: input.cycle.hdFairUseCap,
-              createdAt: input.cycle.createdAt,
-              updatedAt: input.cycle.updatedAt
-            }
-          });
-          await tx.creditBucket.create({ data: input.bucket });
-          await tx.creditLedgerEntry.create({ data: input.ledgerEntry });
-          const updatedOrder = claimResult ? await tx.order.findUnique?.({ where: { id: input.order.id } }) : await tx.order.update?.({
-            where: { id: input.order.id },
-            data: {
-              status: "paid",
-              fulfillmentStatus: "fulfilled",
-              paidAt: input.paidAt,
-              updatedAt: input.paidAt
-            }
-          });
-
-          const order = updatedOrder || { ...input.order, status: "paid", fulfillmentStatus: "fulfilled", paidAt: input.paidAt, updatedAt: input.paidAt };
-          return {
-            order: {
-              id: asString(order.id),
-              userId: asString(order.userId),
-              planId: asString(order.planId, "pro-monthly") as BillingOrder["planId"],
-              amountCents: asNumber(order.amountCents),
-              currency: "CNY" as const,
-              provider: "epay" as const,
-              outTradeNo: asString(order.outTradeNo),
-              status: asString(order.status, "paid") as "pending_payment" | "paid" | "failed" | "refunded",
-              fulfillmentStatus: asString(order.fulfillmentStatus, "fulfilled") as "pending" | "fulfilled" | "failed" | "retryable",
-              paymentUrl: asString(order.paymentUrl) || undefined,
-              paidAt: order.paidAt ? toIso(order.paidAt) : undefined,
-              createdAt: toIso(order.createdAt),
-              updatedAt: toIso(order.updatedAt)
-            },
-            notification: input.notification,
-            cycle: input.cycle,
-            bucket: input.bucket,
-            ledgerEntry: input.ledgerEntry,
-            duplicated: false
-          };
-        });
-      },
-      async createMembershipCycle(cycle) {
-        const prisma = await getPrismaClient();
-        const plan = await prisma.membershipPlan.findUnique?.({ where: { code: cycle.planCode } });
-        const planId = asString(plan?.id, cycle.planCode);
-        await prisma.membershipCycle.create({
-          data: {
-            id: cycle.id,
-            userId: cycle.userId,
-            planId,
-            orderId: cycle.orderId || null,
-            cycleStart: cycle.cycleStart,
-            cycleEnd: cycle.cycleEnd,
-            status: cycle.status,
-            hdDownloadsUsed: cycle.hdDownloadsUsed,
-            hdFairUseCap: cycle.hdFairUseCap,
-            createdAt: cycle.createdAt,
-            updatedAt: cycle.updatedAt
-          }
-        });
-        return cycle;
-      },
-      async updateMembershipCycle(cycleId, patch) {
-        const prisma = await getPrismaClient();
-        const data: Record<string, unknown> = { ...patch };
-        if (patch.planCode) {
-          const plan = await prisma.membershipPlan.findUnique?.({ where: { code: patch.planCode } });
-          data.planId = asString(plan?.id, patch.planCode);
-          delete data.planCode;
-        }
-        await prisma.membershipCycle.update?.({ where: { id: cycleId }, data });
-        return { id: cycleId, userId: "", planCode: "pro-monthly", cycleStart: "", cycleEnd: "", status: "active", hdDownloadsUsed: 0, hdFairUseCap: 300, createdAt: "", updatedAt: "", ...patch };
-      },
-      async consumeMembershipDownload(cycleId, now) {
-        const prisma = await getPrismaClient();
-        const result = await prisma.membershipCycle.updateMany?.({
-          where: {
-            id: cycleId,
-            status: "active",
-            cycleStart: { lte: new Date(now) },
-            cycleEnd: { gt: new Date(now) },
-            hdDownloadsUsed: { lt: 300 }
-          },
-          data: { hdDownloadsUsed: { increment: 1 }, updatedAt: now }
-        });
-        if (!result || result.count === 0) return undefined;
-        const record = await prisma.membershipCycle.findUnique?.({ where: { id: cycleId } });
-        if (!record) return undefined;
-        return {
-          id: asString(record.id),
-          userId: asString(record.userId),
-          planCode: "pro-monthly",
-          orderId: asString(record.orderId) || undefined,
-          cycleStart: toIso(record.cycleStart),
-          cycleEnd: toIso(record.cycleEnd),
-          status: asString(record.status, "active") as "active" | "expired" | "cancelled",
-          hdDownloadsUsed: asNumber(record.hdDownloadsUsed),
-          hdFairUseCap: asNumber(record.hdFairUseCap, 300),
-          createdAt: toIso(record.createdAt),
-          updatedAt: toIso(record.updatedAt)
-        };
-      },
-      async listMembershipCycles(userId) {
-        const prisma = await getPrismaClient();
-        const records = await prisma.membershipCycle.findMany({ where: { userId }, orderBy: { cycleEnd: "desc" } });
-        return records.map(record => ({
-          id: asString(record.id),
-          userId: asString(record.userId),
-          planCode: "pro-monthly",
-          orderId: asString(record.orderId) || undefined,
-          cycleStart: toIso(record.cycleStart),
-          cycleEnd: toIso(record.cycleEnd),
-          status: asString(record.status, "active") as "active" | "expired" | "cancelled",
-          hdDownloadsUsed: asNumber(record.hdDownloadsUsed),
-          hdFairUseCap: asNumber(record.hdFairUseCap, 300),
-          createdAt: toIso(record.createdAt),
-          updatedAt: toIso(record.updatedAt)
-        }));
-      },
       async createDownloadEvent(event) {
         const prisma = await getPrismaClient();
         await prisma.downloadEvent.create({ data: event });
@@ -1820,8 +1601,6 @@ export function createPrismaRepositories(): AppRepositories {
           userId: asString(record.userId),
           downloadType: asString(record.downloadType, "standard_watermarked") as "standard_watermarked" | "hd_no_watermark",
           creditCost: asNumber(record.creditCost),
-          proFairUseApplied: record.proFairUseApplied === true,
-          membershipCycleId: asString(record.membershipCycleId) || undefined,
           createdAt: toIso(record.createdAt)
         }));
       }

@@ -16,7 +16,6 @@ import type {
   CreateImageTaskRecordInput,
   DownloadEventRecord,
   ImageUploadRecord,
-  MembershipCycleRecord,
   ModelConfigurationChangeRecord,
   OrderRecord,
   PaymentNotificationRecord,
@@ -122,11 +121,6 @@ export interface BillingRepository {
   createPaymentNotification: (notification: PaymentNotificationRecord) => Promise<PaymentNotificationRecord>;
   getPaymentNotificationByDigest: (orderId: string, rawPayloadDigest: string) => Promise<PaymentNotificationRecord | undefined>;
   fulfillCreditPackOrder: (input: { order: OrderRecord; notification: PaymentNotificationRecord; bucket: CreditBucketRecord; ledgerEntry: CreditLedgerEntryRecord; paidAt: string }) => Promise<{ order: OrderRecord; notification: PaymentNotificationRecord; bucket?: CreditBucketRecord; ledgerEntry?: CreditLedgerEntryRecord; duplicated: boolean }>;
-  fulfillMembershipOrder: (input: { order: OrderRecord; notification: PaymentNotificationRecord; cycle: MembershipCycleRecord; bucket: CreditBucketRecord; ledgerEntry: CreditLedgerEntryRecord; paidAt: string }) => Promise<{ order: OrderRecord; notification: PaymentNotificationRecord; cycle?: MembershipCycleRecord; bucket?: CreditBucketRecord; ledgerEntry?: CreditLedgerEntryRecord; duplicated: boolean }>;
-  createMembershipCycle: (cycle: MembershipCycleRecord) => Promise<MembershipCycleRecord>;
-  updateMembershipCycle: (cycleId: string, patch: Partial<MembershipCycleRecord>) => Promise<MembershipCycleRecord | undefined>;
-  consumeMembershipDownload: (cycleId: string, now: string) => Promise<MembershipCycleRecord | undefined>;
-  listMembershipCycles: (userId: string) => Promise<MembershipCycleRecord[]>;
   createDownloadEvent: (event: DownloadEventRecord) => Promise<DownloadEventRecord>;
   listDownloadEvents: (userId: string, options?: { from?: string; downloadType?: DownloadEventRecord["downloadType"] }) => Promise<DownloadEventRecord[]>;
 }
@@ -283,7 +277,6 @@ export function createMockDataStore(): AppDataStore {
       }
     ],
     creditHolds: [],
-    membershipCycles: [],
     orders: [],
     paymentNotifications: [],
     uploads: [],
@@ -409,19 +402,16 @@ export function createMockRepositories(store: AppDataStore = createMockDataStore
         const credits = store.creditBuckets
           .filter(bucket => bucket.userId === user.id && bucket.remainingAmount > 0 && bucket.validFrom <= current && (!bucket.validUntil || bucket.validUntil > current))
           .reduce((sum, bucket) => sum + bucket.remainingAmount, 0);
-        const activeCycle = store.membershipCycles.find(cycle => cycle.userId === user.id && cycle.status === "active" && cycle.cycleStart <= current && cycle.cycleEnd > current);
-        const memberStatus = activeCycle ? "pro" : user.memberStatus;
 
         return {
           userId: user.id,
           username: user.username,
           displayName: user.displayName,
           credits,
-          memberStatus,
-          proDaysRemaining: activeCycle ? Math.max(0, Math.ceil((Date.parse(activeCycle.cycleEnd) - Date.now()) / 86400000)) : account.proDaysRemaining,
-          canUseOutpaint: memberStatus === "pro" || memberStatus === "pro_trial",
-          canDownloadHd: memberStatus === "pro" || memberStatus === "pro_trial",
-          canDownloadWithoutWatermark: memberStatus === "pro" || memberStatus === "pro_trial"
+          memberStatus: user.memberStatus,
+          canUseOutpaint: user.memberStatus === "credit_pack",
+          canDownloadHd: user.memberStatus === "credit_pack",
+          canDownloadWithoutWatermark: user.memberStatus === "credit_pack"
         };
       },
       async getUserById(userId) {
@@ -956,46 +946,6 @@ export function createMockRepositories(store: AppDataStore = createMockDataStore
           updatedAt: input.paidAt
         });
         return { order, notification: input.notification, bucket: input.bucket, ledgerEntry: input.ledgerEntry, duplicated: false };
-      },
-      async fulfillMembershipOrder(input) {
-        const existingNotification = store.paymentNotifications.find(notification => notification.orderId === input.order.id);
-        const order = store.orders.find(item => item.id === input.order.id);
-        if (!order) throw new Error("ORDER_NOT_FOUND");
-        if (existingNotification || order.fulfillmentStatus === "fulfilled") {
-          return { order, notification: existingNotification || input.notification, duplicated: true };
-        }
-
-        store.paymentNotifications.push(input.notification);
-        store.membershipCycles.push(input.cycle);
-        store.creditBuckets.push(input.bucket);
-        store.ledgerEntries.push(input.ledgerEntry);
-        Object.assign(order, {
-          status: "paid" as const,
-          fulfillmentStatus: "fulfilled" as const,
-          paidAt: input.paidAt,
-          updatedAt: input.paidAt
-        });
-        return { order, notification: input.notification, cycle: input.cycle, bucket: input.bucket, ledgerEntry: input.ledgerEntry, duplicated: false };
-      },
-      async createMembershipCycle(cycle) {
-        store.membershipCycles.push(cycle);
-        return cycle;
-      },
-      async updateMembershipCycle(cycleId, patch) {
-        const cycle = store.membershipCycles.find(item => item.id === cycleId);
-        if (!cycle) return undefined;
-        Object.assign(cycle, patch, { updatedAt: nowIso() });
-        return cycle;
-      },
-      async consumeMembershipDownload(cycleId, now) {
-        const cycle = store.membershipCycles.find(item => item.id === cycleId);
-        if (!cycle || cycle.status !== "active" || cycle.cycleStart > now || cycle.cycleEnd <= now || cycle.hdDownloadsUsed >= cycle.hdFairUseCap) return undefined;
-        cycle.hdDownloadsUsed += 1;
-        cycle.updatedAt = now;
-        return cycle;
-      },
-      async listMembershipCycles(userId) {
-        return byCreatedDesc(store.membershipCycles.filter(cycle => cycle.userId === userId));
       },
       async createDownloadEvent(event) {
         store.downloads.push(event);

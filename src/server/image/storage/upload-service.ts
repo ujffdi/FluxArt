@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import sharp from "sharp";
-import { proCommercialAuthorizationStatement } from "@/server/account/account-service";
 import { getRepositories } from "@/server/data/repositories";
 import type { ImageUploadRecord, UploadKind } from "@/server/data/records";
 import type { ImageAsset, ImageGenerationTask } from "@/types/image";
@@ -188,8 +187,6 @@ export async function storeGeneratedOutput(input: { task: ImageGenerationTask; b
 export async function createGeneratedAsset(input: { task: ImageGenerationTask; title?: string; output: StoredGeneratedOutput; reviewStatus?: ImageAsset["reviewStatus"] }) {
   const repositories = getRepositories();
   const now = new Date().toISOString();
-  const account = await repositories.account.getCurrentAccount(input.task.userId);
-  const proEntitlement = account.memberStatus === "pro";
   const reviewStatus = input.reviewStatus || "approved";
   const asset: ImageAsset = {
     id: `asset-${randomUUID()}`,
@@ -212,14 +209,6 @@ export async function createGeneratedAsset(input: { task: ImageGenerationTask; t
     downloadState: "not_downloaded",
     modelProvider: input.task.modelProvider,
     modelName: input.task.modelName,
-    entitlementSnapshot: proEntitlement ? {
-      memberStatus: account.memberStatus,
-      capturedAt: now,
-      canDownloadHd: account.canDownloadHd,
-      canDownloadWithoutWatermark: account.canDownloadWithoutWatermark,
-      commercialAuthorizationStatement: proCommercialAuthorizationStatement
-    } : undefined,
-    commercialAuthorizationStatement: proEntitlement ? proCommercialAuthorizationStatement : undefined,
     createdAt: now
   };
 

@@ -23,8 +23,8 @@ export async function createMockOrder(planId: BillingPlanId, userId?: string) {
   const order = await repositories.billing.createOrder({
     planId,
     userId: account.userId,
-    creditsAfterPayment: account.credits + (plan.kind === "credit_pack" ? plan.credits : 0),
-    memberStatusAfterPayment: planId === "pro-monthly" ? "pro" : account.memberStatus
+    creditsAfterPayment: account.credits + plan.credits,
+    memberStatusAfterPayment: "credit_pack"
   });
   const paymentUrl = createEpayPaymentUrl({
     outTradeNo: order.outTradeNo || order.orderId,
@@ -55,8 +55,8 @@ export async function listBillingOrders(userId: string): Promise<BillingOrder[]>
       amountCents: order.amountCents,
       currency: order.currency,
       paymentUrl: order.paymentUrl,
-      creditsAfterPayment: account.credits + (plan.kind === "credit_pack" && order.fulfillmentStatus !== "fulfilled" ? plan.credits : 0),
-      memberStatusAfterPayment: plan.kind === "membership" && order.fulfillmentStatus !== "fulfilled" ? "pro" : account.memberStatus,
+      creditsAfterPayment: account.credits + (order.fulfillmentStatus !== "fulfilled" ? plan.credits : 0),
+      memberStatusAfterPayment: order.fulfillmentStatus !== "fulfilled" ? "credit_pack" : account.memberStatus,
       createdAt: order.createdAt
     };
   });
@@ -76,12 +76,6 @@ function epayAmountMatches(receivedAmount: string | undefined, expectedAmountCen
   const normalized = Number(receivedAmount);
   if (!Number.isFinite(normalized)) return false;
   return Math.round(normalized * 100) === expectedAmountCents;
-}
-
-function addOneMonth(date: Date) {
-  const next = new Date(date.getTime());
-  next.setUTCMonth(next.getUTCMonth() + 1);
-  return next;
 }
 
 function toOrder(planOrder: Awaited<ReturnType<ReturnType<typeof getRepositories>["billing"]["getOrderByOutTradeNo"]>>) {
@@ -125,11 +119,6 @@ async function readVerifiedEpayOrder(input: URLSearchParams | Record<string, unk
 export async function handleEpayCreditPackNotify(input: URLSearchParams | Record<string, unknown>) {
   const { repositories, params, order, plan, receivedAt, rawPayloadDigest } = await readVerifiedEpayOrder(input);
   const providerTradeNo = params.trade_no;
-
-  if (plan.kind !== "credit_pack") {
-    await repositories.billing.updateOrder(order.id, { fulfillmentStatus: "retryable" });
-    throw new PaymentNotificationError("order is not a credit pack", "ORDER_PLAN_UNSUPPORTED");
-  }
 
   const now = iso();
   const existingNotification = await repositories.billing.getPaymentNotificationByDigest(order.id, rawPayloadDigest);
@@ -183,93 +172,6 @@ export async function handleEpayCreditPackNotify(input: URLSearchParams | Record
   }
 }
 
-export async function handleEpayMembershipNotify(input: URLSearchParams | Record<string, unknown>) {
-  const { repositories, params, order, plan, receivedAt, rawPayloadDigest } = await readVerifiedEpayOrder(input);
-  const providerTradeNo = params.trade_no;
-
-  if (plan.kind !== "membership") {
-    await repositories.billing.updateOrder(order.id, { fulfillmentStatus: "retryable" });
-    throw new PaymentNotificationError("order is not a membership plan", "ORDER_PLAN_UNSUPPORTED");
-  }
-
-  const now = iso();
-  const existingNotification = await repositories.billing.getPaymentNotificationByDigest(order.id, rawPayloadDigest);
-  if (existingNotification || order.fulfillmentStatus === "fulfilled") {
-    return { ok: true, duplicated: true, order };
-  }
-
-  const cycles = await repositories.billing.listMembershipCycles(order.userId);
-  const nowDate = new Date(now);
-  const latestActiveCycle = cycles
-    .filter(cycle => cycle.status === "active" && Date.parse(cycle.cycleEnd) > nowDate.getTime())
-    .sort((left, right) => Date.parse(right.cycleEnd) - Date.parse(left.cycleEnd))[0];
-  const cycleStartDate = latestActiveCycle ? new Date(latestActiveCycle.cycleEnd) : nowDate;
-  const cycleEndDate = addOneMonth(cycleStartDate);
-  const cycle = {
-    id: `cycle-${randomUUID()}`,
-    userId: order.userId,
-    planCode: "pro-monthly" as const,
-    orderId: order.id,
-    cycleStart: cycleStartDate.toISOString(),
-    cycleEnd: cycleEndDate.toISOString(),
-    status: "active" as const,
-    hdDownloadsUsed: 0,
-    hdFairUseCap: 300,
-    createdAt: now,
-    updatedAt: now
-  };
-  const currentAccount = await repositories.account.getCurrentAccount(order.userId);
-  const bucket = {
-    id: `bucket-${randomUUID()}`,
-    userId: order.userId,
-    sourceType: "membership" as const,
-    creditType: "promotional" as const,
-    originalAmount: plan.credits,
-    remainingAmount: plan.credits,
-    validFrom: cycle.cycleStart,
-    validUntil: cycle.cycleEnd,
-    priority: 20,
-    sourceOrderId: order.id,
-    membershipCycleId: cycle.id,
-    createdAt: now,
-    updatedAt: now
-  };
-  const ledgerEntry = {
-    id: `ledger-${randomUUID()}`,
-    userId: order.userId,
-    bucketId: bucket.id,
-    entryType: "grant" as const,
-    amount: plan.credits,
-    balanceAfter: currentAccount.credits + (bucket.validFrom <= now ? plan.credits : 0),
-    sourceRefType: "membership_order",
-    sourceRefId: order.id,
-    label: "Pro Membership Monthly Credit Grant",
-    createdAt: now
-  };
-  const notification = {
-    id: `notification-${randomUUID()}`,
-    orderId: order.id,
-    providerTradeNo,
-    verified: true,
-    rawPayloadDigest,
-    receivedAt,
-    processedAt: now
-  };
-
-  try {
-    const fulfilled = await repositories.billing.fulfillMembershipOrder({ order, notification, cycle, bucket, ledgerEntry, paidAt: now });
-    return { ok: true, duplicated: fulfilled.duplicated, order: fulfilled.order, cycle: fulfilled.cycle, bucket: fulfilled.bucket, ledgerEntry: fulfilled.ledgerEntry };
-  } catch (error) {
-    await repositories.billing.updateOrder(order.id, { fulfillmentStatus: "retryable" });
-    throw error;
-  }
-}
-
 export async function handleEpayPaymentNotify(input: URLSearchParams | Record<string, unknown>) {
-  const params = readEpayNotifyParams(input);
-  const order = params.out_trade_no ? await getRepositories().billing.getOrderByOutTradeNo(params.out_trade_no) : undefined;
-  if (order && billingPlans[order.planId]?.kind === "membership") {
-    return handleEpayMembershipNotify(params);
-  }
-  return handleEpayCreditPackNotify(params);
+  return handleEpayCreditPackNotify(input);
 }

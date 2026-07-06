@@ -97,8 +97,7 @@ function billingPlanLabel(planId: BillingPlanId) {
   const labels: Record<BillingPlanId, string> = {
     "credits-500": "500 积分包",
     "credits-1500": "1,500 积分包",
-    "credits-5000": "5,000 积分包",
-    "pro-monthly": "历史订阅订单"
+    "credits-5000": "5,000 积分包"
   };
   return labels[planId];
 }
@@ -1263,7 +1262,6 @@ function AssetsPage({
           <h2>{selected.title}</h2>
           <AssetImage asset={selected} className="preview-img" />
           <p className="small">{selected.id} · {assetOriginLabel(selected.origin)} · {assetTypeLabel(selected)} · {selected.status} · {assetSourceText(selected)}</p>
-          {selected.origin === "generated" && selected.commercialAuthorizationStatement && <p className="notice">{selected.commercialAuthorizationStatement}</p>}
           <div className="actions"><button className="btn primary" type="button" onClick={() => onDownload(selected.id)}>下载</button><Link className="btn" href="/workspace/image" onClick={onImageToImage}>继续图生图</Link><button className="btn" type="button" onClick={() => onDelete(selected.id)}>删除</button></div>
           <div className="timeline"><strong>版本链</strong>{visibleVersionNodes.map(node => <div className="node" key={node.id}><span className="dot" /><div className="rel">{node.label}</div></div>)}</div>
         </aside>

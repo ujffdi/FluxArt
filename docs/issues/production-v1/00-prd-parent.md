@@ -2,7 +2,7 @@
 
 ## What to build
 
-Deliver the FluxArt Production V1 PRD: self-declared accounts, Prisma/MySQL persistence, credit ledger, MinIO asset storage, OpenAI/default and custom image providers, Epay payment fulfillment, Pro membership benefits, and launch validation.
+Deliver the FluxArt Production V1 PRD: self-declared accounts, Prisma/MySQL persistence, credit ledger, MinIO asset storage, OpenAI/default and custom image providers, Epay credit-pack payment fulfillment, and launch validation.
 
 ## Acceptance criteria
 

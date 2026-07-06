@@ -4,23 +4,17 @@ export const activeTaskStates: TaskStatus[] = ["queued", "running", "storing", "
 
 export const taskPriorityByTier: Record<AccountEntitlement["memberStatus"], number> = {
   free: 10,
-  credit_pack: 50,
-  pro_trial: 100,
-  pro: 100
+  credit_pack: 50
 };
 
 export const runningTaskLimitByTier: Record<AccountEntitlement["memberStatus"], number> = {
   free: 1,
-  credit_pack: 2,
-  pro_trial: 4,
-  pro: 4
+  credit_pack: 4
 };
 
 const capabilitiesByTier: Record<AccountEntitlement["memberStatus"], GenerationMode[]> = {
   free: ["t2i", "i2i"],
-  credit_pack: ["t2i", "i2i", "inpaint"],
-  pro_trial: ["t2i", "i2i", "inpaint", "outpaint"],
-  pro: ["t2i", "i2i", "inpaint", "outpaint"]
+  credit_pack: ["t2i", "i2i", "inpaint", "outpaint"]
 };
 
 const allowedTransitions: Record<TaskStatus, TaskStatus[]> = {

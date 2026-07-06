@@ -59,10 +59,8 @@ Client mutations go through `src/features/flux-art/api/image-workspace-client.ts
 - `GET /api/image/assets/:assetId`
 - `POST /api/image/assets/:assetId/download`
 - `GET /api/account/credits`
-- `GET /api/account/membership`
 - `POST /api/billing/orders`
 - `POST /api/orders/credits`
-- `POST /api/orders/membership`
 
 List endpoints accept `page`, `pageSize`, `taskType`, `status`, and `q` query parameters. Invalid pagination, task type, or status values return the same JSON error envelope as mutation endpoints.
 

@@ -1,8 +1,6 @@
 import { getRepositories } from "@/server/data/repositories";
 import { grantDailyFreeCreditsIfNeeded } from "@/server/credits/credit-service";
-import type { AccountCreditsSummary, AccountMembershipSummary } from "@/types/image";
-
-export const proCommercialAuthorizationStatement = "Pro paid membership grants commercial use authorization for generated assets created while the membership cycle is active, subject to FluxArt content and usage policies.";
+import type { AccountCreditsSummary } from "@/types/image";
 
 export async function getCreditsSummary(userId?: string): Promise<AccountCreditsSummary> {
   const repositories = getRepositories();
@@ -33,27 +31,5 @@ export async function getCreditsSummary(userId?: string): Promise<AccountCredits
       balanceAfter: entry.balanceAfter,
       createdAt: entry.createdAt
     }))
-  };
-}
-
-export async function getMembershipSummary(userId?: string): Promise<AccountMembershipSummary> {
-  const repositories = getRepositories();
-  const account = await repositories.account.getCurrentAccount(userId);
-  const now = Date.now();
-  const activeCycle = userId
-    ? (await repositories.billing.listMembershipCycles(userId))
-      .filter(cycle => cycle.status === "active" && Date.parse(cycle.cycleStart) <= now && Date.parse(cycle.cycleEnd) > now)
-      .sort((left, right) => Date.parse(right.cycleEnd) - Date.parse(left.cycleEnd))[0]
-    : undefined;
-
-  return {
-    userId: account.userId,
-    memberStatus: account.memberStatus,
-    proDaysRemaining: account.proDaysRemaining,
-    canUseOutpaint: account.canUseOutpaint,
-    canDownloadHd: account.canDownloadHd,
-    canDownloadWithoutWatermark: account.canDownloadWithoutWatermark,
-    includedHdDownloadsRemaining: activeCycle ? Math.max(0, activeCycle.hdFairUseCap - activeCycle.hdDownloadsUsed) : undefined,
-    commercialAuthorizationStatement: account.memberStatus === "pro" ? proCommercialAuthorizationStatement : undefined
   };
 }

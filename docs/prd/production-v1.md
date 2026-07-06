@@ -8,7 +8,7 @@ The next production slice must turn the mock product into a real online AI image
 
 ## Solution
 
-Build FluxArt Production V1 on the current Next.js, React, and TypeScript app. Replace the in-memory repository with a Prisma adapter backed by MySQL, add self-declared username/password accounts, implement server-side sessions, make credits and memberships ledger-backed, store source and generated images in a public MinIO bucket, run image generation through a replaceable provider runner, and fulfill credit packs and Pro memberships from verified Epay payment notifications.
+Build FluxArt Production V1 on the current Next.js, React, and TypeScript app. Replace the in-memory repository with a Prisma adapter backed by MySQL, add self-declared username/password accounts, implement server-side sessions, make credits ledger-backed, store source and generated images in a public MinIO bucket, run image generation through a replaceable provider runner, and fulfill credit packs from verified Epay payment notifications.
 
 The default image provider remains OpenAI `gpt-image-2`, with support for custom OpenAI-compatible image providers and future asynchronous providers.
 
@@ -20,22 +20,19 @@ The default image provider remains OpenAI `gpt-image-2`, with support for custom
 4. As a user, I want password changes to clear old sessions, so that compromised sessions stop working.
 5. As a new user, I want to receive registration credits, so that I can try image generation immediately.
 6. As a Free User, I want daily free credits to appear when I use the product, so that I can keep lightly testing FluxArt.
-7. As a Free User, I want clear limits on generation and history, so that I understand why I may need credits or Pro.
+7. As a Free User, I want clear limits on generation and history, so that I understand why I may need purchased credits.
 8. As a Credit Pack User, I want to buy fixed credit packs, so that I can pay for occasional generation work.
-9. As a Pro Member, I want monthly credits and better limits, so that FluxArt works for repeat production use.
-10. As a Pro Member, I want HD no-watermark downloads within a fair-use cap, so that membership has a visible benefit.
-11. As a user, I want credits held before generation and refunded when no usable output is delivered, so that failed tasks do not consume balance unfairly.
-12. As a user, I want image tasks to show stable task states, so that I know whether a generation is queued, running, storing, reviewing, succeeded, failed, or refunded.
-13. As a user, I want source images and masks uploaded safely, so that editing and outpainting work without corrupt inputs.
-14. As a user, I want generated assets stored reliably, so that my history and downloads do not depend on server memory.
-15. As a Pro Member, I want commercial authorization wording attached to eligible assets, so that I can identify which generations had Pro benefits.
-16. As an operator, I want image providers abstracted behind one runner, so that OpenAI can be the default while other providers remain possible.
-17. As an operator, I want synchronous and asynchronous providers normalized, so that vendor-specific response shapes do not leak into product logic.
-18. As an operator, I want payment callbacks to be verified and idempotent, so that credits and memberships are not double-granted.
-19. As an operator, I want order fulfillment failures to be retryable, so that paid users can be made whole without manual database edits.
-20. As an operator, I want immutable credit and payment ledgers, so that billing support and reconciliation are possible.
-21. As an operator, I want public MinIO URLs with non-guessable keys, so that V1 delivery is simple without making assets easy to enumerate.
-22. As an operator, I want environment validation for MySQL, MinIO, OpenAI, custom providers, and Epay, so that deployment misconfiguration is caught early.
+9. As a user, I want credits held before generation and refunded when no usable output is delivered, so that failed tasks do not consume balance unfairly.
+10. As a user, I want image tasks to show stable task states, so that I know whether a generation is queued, running, storing, reviewing, succeeded, failed, or refunded.
+11. As a user, I want source images and masks uploaded safely, so that editing and outpainting work without corrupt inputs.
+12. As a user, I want generated assets stored reliably, so that my history and downloads do not depend on server memory.
+13. As an operator, I want image providers abstracted behind one runner, so that OpenAI can be the default while other providers remain possible.
+14. As an operator, I want synchronous and asynchronous providers normalized, so that vendor-specific response shapes do not leak into product logic.
+15. As an operator, I want payment callbacks to be verified and idempotent, so that credits are not double-granted.
+16. As an operator, I want order fulfillment failures to be retryable, so that paid users can be made whole without manual database edits.
+17. As an operator, I want immutable credit and payment ledgers, so that billing support and reconciliation are possible.
+18. As an operator, I want public MinIO URLs with non-guessable keys, so that V1 delivery is simple without making assets easy to enumerate.
+19. As an operator, I want environment validation for MySQL, MinIO, OpenAI, custom providers, and Epay, so that deployment misconfiguration is caught early.
 
 ## Implementation Decisions
 
@@ -48,13 +45,10 @@ The default image provider remains OpenAI `gpt-image-2`, with support for custom
 - Grant 50 Promotional Credits at registration.
 - Grant 10 Daily Free Credits lazily when a Free User first checks balance or starts task creation that day, capped at 30 Daily Free Credits.
 - Use Credit Buckets and immutable Credit Ledger Entries for all grants, spends, refunds, holds, and adjustments.
-- Spend expiring Promotional Credits first, then monthly membership grants, then Purchased Credits.
+- Spend expiring Promotional Credits first, then Purchased Credits.
 - Hold credits before creating an image task. Convert the hold to final spend only when a Usable Output is approved. Release or refund the hold for system failures or output review failures.
-- Use fixed V1 costs: Text-to-Image 10 credits per image, Image-to-Image 15 credits per image, Inpainting 20 credits per edit, Outpainting 30 credits per edit, HD no-watermark download 5 credits for non-Pro users.
+- Use fixed V1 costs: Text-to-Image 10 credits per image, Image-to-Image 15 credits per image, Inpainting 20 credits per edit, Outpainting 30 credits per edit, HD no-watermark download 5 credits.
 - Offer three long-lived credit packs: 500 credits for CNY 29, 1500 credits for CNY 79, and 5000 credits for CNY 199.
-- Offer a Pro membership placeholder of CNY 69 per month, granting 1000 monthly Promotional Credits and better limits. Pro is not unlimited and does not get V1 credit discounts.
-- Include 300 Pro HD no-watermark downloads per month; beyond that, charge 5 credits per image.
-- Store monthly Pro grants as Promotional Credit Buckets that expire at the membership cycle end.
 - Use a compact task state machine: queued, running, storing, reviewing, succeeded, failed, refunded.
 - Use a replaceable Image Task Runner seam. V1 may execute from the Next.js server process, but task state, priority, and provider abstractions must allow migration to BullMQ, cloud tasks, or a standalone worker.
 - Normalize synchronous and asynchronous image providers into Provider Submission and Provider Result records.
@@ -65,9 +59,8 @@ The default image provider remains OpenAI `gpt-image-2`, with support for custom
 - Review generated output before final credit spend. Initial V1 review can be lightweight but must preserve review status for later moderation.
 - Use server-side Epay integration. The server creates local orders and treats provider notify callbacks as the source of truth.
 - Make payment notifications signature-verified, amount-verified, merchant-verified, status-verified, and idempotent.
-- Fulfill paid orders transactionally. Credit pack orders create Purchased Credit Buckets; Pro orders create or extend Membership Cycles and grant monthly credits.
+- Fulfill paid orders transactionally. Credit pack orders create Purchased Credit Buckets and Credit Ledger Entries.
 - Separate visible asset history from physical object deletion. Free Users keep visible history for 7 days or 20 assets, whichever is stricter. Paid assets are long-lived in V1.
-- Store Pro commercial authorization snapshots on eligible assets. Do not over-promise third-party rights in uploads, trademarks, likenesses, or other external material.
 
 ### Prisma/MySQL Table Design
 
@@ -76,12 +69,10 @@ V1 should model these durable records:
 - `User`: account identity, display name, status, timestamps.
 - `UserCredential`: username, password hash, hash version, password changed timestamp.
 - `UserSession`: hashed session token, sliding expiry, absolute expiry, revoked timestamp, user agent and IP metadata.
-- `CreditBucket`: user, source type, credit type, original amount, remaining amount, validity window, priority, source order or membership cycle.
+- `CreditBucket`: user, source type, credit type, original amount, remaining amount, validity window, priority, and optional source order.
 - `CreditLedgerEntry`: immutable grant, hold, spend, refund, release, adjustment records with balance deltas and source references.
 - `CreditHold`: task or download reservation, held amount, status, expiry, converted or refunded timestamps.
 - `CreditPackSku`: package code, display name, credit amount, price, active flag.
-- `MembershipPlan`: plan code, monthly price, monthly credit grant, HD fair-use cap, active flag.
-- `MembershipCycle`: user, plan, cycle start/end, payment order, status.
 - `Order`: user, SKU or plan, amount, currency, provider, outTradeNo, status, fulfillment status.
 - `PaymentNotification`: order, provider trade number, verified status, raw payload digest, received timestamp, processed timestamp.
 - `ImageUpload`: user-owned uploaded source or mask, object key, public URL, MIME type, size, dimensions, validation status.
@@ -89,7 +80,7 @@ V1 should model these durable records:
 - `ProviderSubmission`: task, provider, model, provider mode, request metadata, external task id.
 - `ProviderResult`: submission, normalized result status, raw payload digest, output metadata, error metadata.
 - `ImageAsset`: task and user, object key, public URL, dimensions, review status, watermark/HD flags, entitlement snapshot, deletion timestamp.
-- `DownloadEvent`: asset, user, download type, credit cost, Pro fair-use accounting, timestamp.
+- `DownloadEvent`: asset, user, download type, credit cost, timestamp.
 - `AssetCleanupJob`: optional deferred physical MinIO cleanup for soft-deleted or retention-expired assets.
 
 ## Testing Decisions
@@ -107,11 +98,9 @@ V1 should model these durable records:
 
 - Phone verification, email verification, OAuth login, SSO, and enterprise accounts.
 - Full legal commercial license drafting.
-- Unlimited Pro generation.
 - Redis, BullMQ, or a dedicated worker deployment as a hard V1 requirement.
 - Private MinIO buckets and signed URLs.
 - Full manual moderation tooling.
-- Subscription auto-renewal edge cases beyond a single paid Pro cycle and extend-on-payment behavior.
 - Refunds back to the external payment method.
 
 ## Further Notes

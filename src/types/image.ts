@@ -100,7 +100,6 @@ export interface ImageAsset {
   modelProvider: ImageProvider | string;
   modelName: string;
   entitlementSnapshot?: EntitlementSnapshot;
-  commercialAuthorizationStatement?: string;
   deletedAt?: string;
   createdAt: string;
 }
@@ -124,8 +123,7 @@ export interface AccountEntitlement {
   username?: string;
   displayName: string;
   credits: number;
-  memberStatus: "free" | "credit_pack" | "pro_trial" | "pro";
-  proDaysRemaining: number;
+  memberStatus: "free" | "credit_pack";
   canUseOutpaint: boolean;
   canDownloadHd: boolean;
   canDownloadWithoutWatermark: boolean;
@@ -147,17 +145,6 @@ export interface AccountCreditsSummary {
     balanceAfter: number;
     createdAt: string;
   }>;
-}
-
-export interface AccountMembershipSummary {
-  userId: string;
-  memberStatus: AccountEntitlement["memberStatus"];
-  proDaysRemaining: number;
-  canUseOutpaint: boolean;
-  canDownloadHd: boolean;
-  canDownloadWithoutWatermark: boolean;
-  includedHdDownloadsRemaining?: number;
-  commercialAuthorizationStatement?: string;
 }
 
 export interface CreateImageTaskInput {
@@ -182,7 +169,6 @@ export interface DownloadDecision {
   costCredits: number;
   reason: string;
   requiresPayment?: boolean;
-  fairUseApplied?: boolean;
   downloadUrl?: string;
 }
 
@@ -191,5 +177,4 @@ export interface EntitlementSnapshot {
   capturedAt: string;
   canDownloadHd: boolean;
   canDownloadWithoutWatermark: boolean;
-  commercialAuthorizationStatement?: string;
 }

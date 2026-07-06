@@ -3,7 +3,6 @@ import type { AuthAccount, AuthSession } from "@/types/auth";
 import type { BillingOrder, BillingPlanId } from "@/types/billing";
 import type {
   AccountCreditsSummary,
-  AccountMembershipSummary,
   AssetVersionNode,
   CreateImageTaskInput,
   DownloadDecision,
@@ -161,8 +160,7 @@ export async function uploadImageAsset(file: File): Promise<ImageAsset> {
 }
 
 export async function createBillingOrder(planId: BillingPlanId): Promise<BillingOrder> {
-  const endpoint = planId === "pro-monthly" ? "/api/orders/membership" : "/api/orders/credits";
-  const payload = await requestApi<{ order: BillingOrder }>(endpoint, {
+  const payload = await requestApi<{ order: BillingOrder }>("/api/orders/credits", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ planId })
@@ -205,9 +203,4 @@ export async function logoutCurrentSession(): Promise<void> {
 export async function getAccountCredits(): Promise<AccountCreditsSummary> {
   const payload = await requestApi<{ credits: AccountCreditsSummary }>("/api/account/credits");
   return payload.credits;
-}
-
-export async function getAccountMembership(): Promise<AccountMembershipSummary> {
-  const payload = await requestApi<{ membership: AccountMembershipSummary }>("/api/account/membership");
-  return payload.membership;
 }

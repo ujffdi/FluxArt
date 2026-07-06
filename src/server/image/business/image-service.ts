@@ -482,13 +482,6 @@ export async function deleteAsset(assetId: string, userId: string) {
 
 const hdNoWatermarkDownloadCost = 5;
 
-async function activeMembershipCycle(userId: string) {
-  const now = Date.now();
-  return (await getRepositories().billing.listMembershipCycles(userId))
-    .filter(cycle => cycle.status === "active" && Date.parse(cycle.cycleStart) <= now && Date.parse(cycle.cycleEnd) > now)
-    .sort((left, right) => Date.parse(right.cycleEnd) - Date.parse(left.cycleEnd))[0];
-}
-
 export async function decideDownload(assetId: string, userId?: string): Promise<DownloadDecision> {
   const repositories = getRepositories();
   const [asset, account] = await Promise.all([
@@ -530,20 +523,6 @@ export async function decideDownload(assetId: string, userId?: string): Promise<
     };
   }
 
-  const activeCycle = account.memberStatus === "pro" ? await activeMembershipCycle(account.userId) : undefined;
-  if (activeCycle && activeCycle.hdDownloadsUsed < activeCycle.hdFairUseCap) {
-    return {
-      assetId,
-      allowed: true,
-      quality: "hd",
-      watermark: false,
-      costCredits: 0,
-      reason: `Pro 本周期剩余 ${activeCycle.hdFairUseCap - activeCycle.hdDownloadsUsed} 次高清无水印下载额度`,
-      fairUseApplied: true,
-      downloadUrl: asset.imageUrl
-    };
-  }
-
   if (account.credits < hdNoWatermarkDownloadCost) {
     return {
       assetId,
@@ -562,7 +541,7 @@ export async function decideDownload(assetId: string, userId?: string): Promise<
     quality: "hd",
     watermark: false,
     costCredits: hdNoWatermarkDownloadCost,
-    reason: account.memberStatus === "pro" ? "本周期 Pro 免费额度已用完，本次高清无水印下载扣 5 credits" : "非 Pro 用户高清无水印下载扣 5 credits",
+    reason: "高清无水印下载扣 5 credits",
     requiresPayment: true,
     downloadUrl: asset.imageUrl
   };
@@ -573,51 +552,16 @@ export async function confirmDownload(assetId: string, userId: string): Promise<
   const decision = await decideDownload(assetId, userId);
   if (!decision.allowed) return decision;
 
-  const activeCycle = decision.fairUseApplied ? await activeMembershipCycle(userId) : undefined;
   const now = new Date().toISOString();
 
   try {
-    if (activeCycle && decision.costCredits === 0) {
-      const consumedCycle = await repositories.billing.consumeMembershipDownload(activeCycle.id, now);
-      if (!consumedCycle) {
-        const download = await repositories.billing.createDownloadEvent({
-          id: `download-${randomUUID()}`,
-          assetId,
-          userId,
-          downloadType: "hd_no_watermark",
-          creditCost: hdNoWatermarkDownloadCost,
-          proFairUseApplied: false,
-          membershipCycleId: activeCycle.id,
-          createdAt: now
-        });
-        await spendCreditsForDownload(userId, { downloadId: download.id, amount: hdNoWatermarkDownloadCost });
-        await repositories.image.updateAsset(assetId, { downloadState: "hd" });
-        return {
-          ...decision,
-          costCredits: hdNoWatermarkDownloadCost,
-          fairUseApplied: false,
-          reason: "本周期 Pro 免费额度已用完，本次高清无水印下载扣 5 credits"
-        };
-      }
-      await repositories.billing.createDownloadEvent({
-        id: `download-${randomUUID()}`,
-        assetId,
-        userId,
-        downloadType: "hd_no_watermark",
-        creditCost: 0,
-        proFairUseApplied: true,
-        membershipCycleId: activeCycle.id,
-        createdAt: now
-      });
-    } else if (decision.costCredits > 0) {
+    if (decision.costCredits > 0) {
       const download = await repositories.billing.createDownloadEvent({
         id: `download-${randomUUID()}`,
         assetId,
         userId,
         downloadType: "hd_no_watermark",
         creditCost: decision.costCredits,
-        proFairUseApplied: false,
-        membershipCycleId: activeCycle?.id,
         createdAt: now
       });
       await spendCreditsForDownload(userId, { downloadId: download.id, amount: decision.costCredits });

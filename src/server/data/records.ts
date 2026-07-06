@@ -2,7 +2,7 @@ import type { BillingPlanId } from "@/types/billing";
 import type { AccountEntitlement, GenerationMode, ImageAsset, ImageGenerationTask, TaskStatus } from "@/types/image";
 import type { ActiveImageModelConfiguration, ModelConfigurationChange } from "@/types/model-config";
 
-export type CreditBucketSourceType = "registration" | "daily_free" | "purchased" | "membership" | "adjustment";
+export type CreditBucketSourceType = "registration" | "daily_free" | "purchased" | "adjustment";
 export type CreditType = "promotional" | "purchased";
 export type CreditLedgerEntryType = "grant" | "hold" | "spend" | "refund" | "release" | "adjustment";
 export type CreditHoldStatus = "active" | "spent" | "released" | "refunded" | "expired";
@@ -69,7 +69,6 @@ export interface CreditBucketRecord {
   validUntil?: string;
   priority: number;
   sourceOrderId?: string;
-  membershipCycleId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -99,20 +98,6 @@ export interface CreditHoldRecord {
   convertedAt?: string;
   refundedAt?: string;
   releasedAt?: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface MembershipCycleRecord {
-  id: string;
-  userId: string;
-  planCode: "pro-monthly";
-  orderId?: string;
-  cycleStart: string;
-  cycleEnd: string;
-  status: "active" | "expired" | "cancelled";
-  hdDownloadsUsed: number;
-  hdFairUseCap: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -186,8 +171,6 @@ export interface DownloadEventRecord {
   userId: string;
   downloadType: DownloadType;
   creditCost: number;
-  proFairUseApplied: boolean;
-  membershipCycleId?: string;
   createdAt: string;
 }
 
@@ -209,7 +192,6 @@ export interface AppDataStore {
   creditBuckets: CreditBucketRecord[];
   ledgerEntries: CreditLedgerEntryRecord[];
   creditHolds: CreditHoldRecord[];
-  membershipCycles: MembershipCycleRecord[];
   orders: OrderRecord[];
   paymentNotifications: PaymentNotificationRecord[];
   uploads: ImageUploadRecord[];

@@ -1,6 +1,6 @@
 # FluxArt Product Context
 
-FluxArt is an online AI image generation product. This context defines the product language for accounts, credits, memberships, image generation, downloads, and billing.
+FluxArt is an online AI image generation product. This context defines the product language for accounts, credits, image generation, downloads, and billing.
 
 ## Language
 
@@ -17,7 +17,7 @@ The time period during which a Credit Bucket can be spent. Purchased Credits sho
 _Avoid_: Expiry rule
 
 **Promotional Credit**:
-Credit granted by registration, daily refresh, campaign, or membership benefits. Promotional Credits may have stricter validity, accumulation, and usage rules than Purchased Credits.
+Credit granted by registration, daily refresh, or campaign. Promotional Credits may have stricter validity, accumulation, and usage rules than Purchased Credits.
 _Avoid_: Free point, bonus token
 
 **Registration Credit Grant**:
@@ -77,11 +77,11 @@ The component that executes queued image tasks by calling the selected provider,
 _Avoid_: Worker when the deployment mechanism is not fixed
 
 **Running Task Limit**:
-The maximum number of image tasks a user can have running at the same time. V1 allows 1 for Free Users, 2 for Credit Pack Users, and 4 for Pro Members.
+The maximum number of image tasks a user can have running at the same time. V1 allows 1 for Free Users and 4 for Credit Pack Users.
 _Avoid_: Rate limit
 
 **Task Priority**:
-The numeric priority stored on an image task for queue ordering. V1 uses 100 for Pro Members, 50 for Credit Pack Users, and 10 for Free Users.
+The numeric priority stored on an image task for queue ordering. V1 uses 50 for Credit Pack Users and 10 for Free Users.
 _Avoid_: Queue tier
 
 **Image Task State Machine**:
@@ -133,7 +133,7 @@ The server-side integration layer that creates payment requests and verifies pay
 _Avoid_: Payment config
 
 **Payment Notification**:
-The provider callback that confirms whether an order has been paid. In V1, the notification is the source of truth for granting credits or membership benefits; return page redirects only update UI state.
+The provider callback that confirms whether an order has been paid. In V1, the notification is the source of truth for granting credits; return page redirects only update UI state.
 _Avoid_: Payment success page
 
 **Provider Trade Number**:
@@ -141,16 +141,12 @@ The payment provider's transaction identifier stored for reconciliation after a 
 _Avoid_: Payment id
 
 **Order Fulfillment**:
-The transactional process that grants Purchased Credits, membership cycles, monthly Promotional Credits, or other entitlements after a paid order notification is verified.
+The transactional process that grants Purchased Credits after a paid order notification is verified.
 _Avoid_: Payment side effect
 
 **Entitlement Snapshot**:
 A stored copy of the user's relevant paid rights at the moment an order, asset, or download right is created. It helps future billing support, asset authorization, and audit work.
 _Avoid_: Current plan cache
-
-**Commercial Authorization Statement**:
-A product-visible statement for Pro-generated assets that records the platform-side commercial usage benefit available at generation time. It is not shown on User Uploaded Assets and does not cover third-party rights in user uploads, trademarks, likeness, or external source material.
-_Avoid_: Full legal license
 
 **Asset Retention Policy**:
 The rule that decides how long generated and user uploaded assets stay visible in user history and when stored files can be physically cleaned up. V1 limits Free User visible history but keeps paid-user generated assets long-lived.
@@ -161,8 +157,8 @@ A user-deleted asset hidden from normal asset center browsing by a deletedAt tim
 _Avoid_: Deleted file
 
 **User Uploaded Asset**:
-An image supplied by the user that is saved into the asset center as a first-class asset without being produced by an image task. In V1 it can be used as Image-to-Image source material only, and it does not receive platform-side commercial authorization for generated assets.
-_Avoid_: Generated result, temporary upload, Pro generated asset
+An image supplied by the user that is saved into the asset center as a first-class asset without being produced by an image task. In V1 it can be used as Image-to-Image source material only.
+_Avoid_: Generated result, temporary upload
 
 **Asset Display Title**:
 A user-facing name for an asset in the asset center. User Uploaded Assets default their display title from the original file name so they remain recognizable without a prompt.
@@ -181,11 +177,11 @@ The server-side file validation rules for User Uploaded Assets, source images, a
 _Avoid_: Frontend upload hint
 
 **Credit Spend Priority**:
-The order in which Credit Buckets are consumed: expiring Promotional Credits first, then monthly membership grants, then Purchased Credits.
+The order in which Credit Buckets are consumed: expiring Promotional Credits first, then Purchased Credits.
 _Avoid_: Deduction strategy
 
 **Base Credit Cost**:
-The standard credit cost for one unit of a billable capability before membership discounts or promotions.
+The standard credit cost for one unit of a billable capability before promotions.
 _Avoid_: Unit price, base price
 
 **Billable Capability**:
@@ -193,7 +189,7 @@ A product action that can consume credits, such as Text-to-Image, Image-to-Image
 _Avoid_: Paid feature
 
 **Free User**:
-A user who has not purchased credits or an active membership. Free Users can experience limited generation quality and workflow value, but are not promised heavy usage.
+A user who has not purchased credits. Free Users can experience limited generation quality and workflow value, but are not promised heavy usage.
 _Avoid_: Guest, trial user
 
 **Self-Declared Account**:
@@ -224,36 +220,16 @@ _Avoid_: Pay-as-you-go user, paid user
 A paid package that grants a fixed amount of Purchased Credits. V1 offers 500, 1500, and 5000 credit packs.
 _Avoid_: Recharge package, top-up plan
 
-**Pro Member**:
-A user with an active recurring membership. Pro Members receive membership benefits such as monthly credits, better download rights, higher concurrency, priority queueing, and commercial authorization wording.
-_Avoid_: Subscriber, unlimited user
-
-**Monthly Credit Grant**:
-Credits granted as part of a Pro membership cycle. These credits are not an unlimited generation entitlement.
-_Avoid_: Unlimited quota, membership balance
-
-**Membership Cycle**:
-The active billing period for a Pro Member. Monthly Credit Grants are valid only within their Membership Cycle.
-_Avoid_: Subscription month
-
-**Membership Discount**:
-A reduction in Base Credit Cost granted by membership status. FluxArt V1 does not include Membership Discounts.
-_Avoid_: Pro discount
-
 **Watermarked Download**:
 A standard-resolution download that includes a product watermark. This is the default download right for Free Users.
 _Avoid_: Free download
 
 **HD Download**:
-A higher-quality download that may be unlocked by Pro membership or paid for with credits.
+A higher-quality download unlocked with credits.
 _Avoid_: Original download
 
-**Fair-Use Cap**:
-A high monthly usage cap applied to an included membership benefit to prevent abuse while staying invisible to ordinary users.
-_Avoid_: Hard quota, hidden limit
-
 **Priority Queue**:
-A membership benefit that places eligible tasks ahead of lower-priority work without removing credit consumption.
+A paid-account behavior that places eligible Credit Pack User tasks ahead of lower-priority Free User work without removing credit consumption.
 _Avoid_: Fast lane, unlimited speed
 
 **Text-to-Image**:

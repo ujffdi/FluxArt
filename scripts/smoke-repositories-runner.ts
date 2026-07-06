@@ -147,8 +147,6 @@ async function run() {
     creditHold: makeDelegate([]),
     order: makeDelegate([]),
     paymentNotification: makeDelegate([]),
-    membershipPlan: makeDelegate([{ id: "plan-pro-monthly", code: "pro-monthly", displayName: "Pro", monthlyPriceCents: 6900, monthlyCreditGrant: 1000, hdFairUseCap: 300, active: true, createdAt: now, updatedAt: now }]),
-    membershipCycle: makeDelegate([]),
     imageUpload: makeDelegate([]),
     imageTask: makeDelegate([], { maxStringLengths: { failureReason: 255 } }),
     providerSubmission: makeDelegate([]),
@@ -606,23 +604,23 @@ async function run() {
   expect(creditPackStore.ledgerEntries.some(entry => entry.entryType === "spend"), "approved usable output should write spend ledger entries");
   setRepositoriesForTesting(undefined);
 
-  const proStore = createMockDataStore();
-  proStore.users[0].memberStatus = "pro";
-  proStore.creditBuckets[0].remainingAmount = 100;
-  proStore.creditBuckets[0].originalAmount = 100;
-  proStore.tasks = [];
-  proStore.creditHolds = [];
-  proStore.ledgerEntries = [];
-  setRepositoriesForTesting(createMockRepositories(proStore));
-  const proTask = await createTask({ taskType: "outpaint", prompt: "pro outpaint", count: 1, size: "1024x1024", sourceAssetId: "IMG-1832" }, proStore.users[0].id);
-  expect(proTask.priority === 100, "pro users should store task priority 100");
-  await transitionTaskState(proTask.id, "running", proStore.users[0].id);
-  await transitionTaskState(proTask.id, "storing", proStore.users[0].id);
-  await transitionTaskState(proTask.id, "reviewing", proStore.users[0].id);
-  const rejectedTask = await transitionTaskState(proTask.id, "failed", proStore.users[0].id, { errorCode: "OUTPUT_REJECTED", errorMessage: "output review rejected" });
+  const paidStore = createMockDataStore();
+  paidStore.users[0].memberStatus = "credit_pack";
+  paidStore.creditBuckets[0].remainingAmount = 100;
+  paidStore.creditBuckets[0].originalAmount = 100;
+  paidStore.tasks = [];
+  paidStore.creditHolds = [];
+  paidStore.ledgerEntries = [];
+  setRepositoriesForTesting(createMockRepositories(paidStore));
+  const paidTask = await createTask({ taskType: "outpaint", prompt: "credit pack outpaint", count: 1, size: "1024x1024", sourceAssetId: "IMG-1832" }, paidStore.users[0].id);
+  expect(paidTask.priority === 50, "credit pack users should store task priority 50");
+  await transitionTaskState(paidTask.id, "running", paidStore.users[0].id);
+  await transitionTaskState(paidTask.id, "storing", paidStore.users[0].id);
+  await transitionTaskState(paidTask.id, "reviewing", paidStore.users[0].id);
+  const rejectedTask = await transitionTaskState(paidTask.id, "failed", paidStore.users[0].id, { errorCode: "OUTPUT_REJECTED", errorMessage: "output review rejected" });
   expect(rejectedTask?.status === "failed", "output review failures should transition tasks to failed");
-  expect(proStore.creditHolds[0]?.status === "released", "output review failures should release active holds");
-  expect(proStore.ledgerEntries.some(entry => entry.entryType === "release"), "output review failures should write release ledger entries");
+  expect(paidStore.creditHolds[0]?.status === "released", "output review failures should release active holds");
+  expect(paidStore.ledgerEntries.some(entry => entry.entryType === "release"), "output review failures should write release ledger entries");
   setRepositoriesForTesting(undefined);
 
   const task = await repositories.image.createTask({
@@ -679,18 +677,15 @@ async function run() {
     modelProvider: "openai",
     modelName: "gpt-image-2",
     entitlementSnapshot: {
-      memberStatus: "pro",
+      memberStatus: "credit_pack",
       capturedAt: now.toISOString(),
       canDownloadHd: true,
-      canDownloadWithoutWatermark: true,
-      commercialAuthorizationStatement: "Commercial authorization smoke"
+      canDownloadWithoutWatermark: true
     },
-    commercialAuthorizationStatement: "Commercial authorization smoke",
     createdAt: now.toISOString()
   });
   expect((await repositories.image.getAsset(asset.id))?.objectKey === asset.objectKey, "Prisma adapter should create/read asset storage metadata");
-  expect((await repositories.image.getAsset(asset.id))?.entitlementSnapshot?.memberStatus === "pro", "Prisma adapter should read asset entitlement snapshots");
-  expect((await repositories.image.getAsset(asset.id))?.commercialAuthorizationStatement === "Commercial authorization smoke", "Prisma adapter should read commercial authorization statements");
+  expect((await repositories.image.getAsset(asset.id))?.entitlementSnapshot?.memberStatus === "credit_pack", "Prisma adapter should read asset entitlement snapshots");
   await repositories.image.updateAsset(asset.id, { downloadState: "hd" });
   expect((await repositories.image.getAsset(asset.id))?.downloadState === "hd", "Prisma adapter should update assets");
   await repositories.image.updateAsset(asset.id, { status: "failed", reviewStatus: "rejected" });
@@ -1191,90 +1186,12 @@ async function run() {
   expect(duplicateFulfillment.duplicated, "duplicate payment notifications should be idempotent");
   expect(!(await repositories.credits.listBuckets(userId)).some(item => item.id === "bucket-duplicate-fulfillment-smoke"), "duplicate payment notifications should not duplicate purchased buckets");
 
-  const cycle = await repositories.billing.createMembershipCycle({
-    id: "cycle-smoke",
-    userId,
-    planCode: "pro-monthly",
-    orderId: order.orderId,
-    cycleStart: now.toISOString(),
-    cycleEnd: new Date("2026-07-24T00:00:00.000Z").toISOString(),
-    status: "active",
-    hdDownloadsUsed: 0,
-    hdFairUseCap: 300,
-    createdAt: now.toISOString(),
-    updatedAt: now.toISOString()
-  });
-  expect(cycle.id === "cycle-smoke", "Prisma adapter should create membership cycles");
-  expect(delegates.membershipCycle.rows[0].planId === "plan-pro-monthly", "Prisma adapter should resolve membership plan code to durable plan id");
-  await repositories.billing.updateMembershipCycle(cycle.id, { hdDownloadsUsed: 1 });
-  expect((await repositories.billing.listMembershipCycles(userId)).find(item => item.id === cycle.id)?.hdDownloadsUsed === 1, "Prisma adapter should update/list membership cycles");
-  const consumedDownloadCycle = await repositories.billing.consumeMembershipDownload(cycle.id, now.toISOString());
-  expect(consumedDownloadCycle?.hdDownloadsUsed === 2, "Prisma adapter should atomically consume membership download allowance");
-  await repositories.billing.updateMembershipCycle(cycle.id, { hdDownloadsUsed: 300 });
-  expect((await repositories.billing.consumeMembershipDownload(cycle.id, now.toISOString())) === undefined, "membership download allowance should stop at the fair-use cap");
-
-  const futureStore = createMockDataStore();
-  const futureRepositories = createMockRepositories(futureStore);
-  const futureUser = await futureRepositories.auth.createRegistration({
-    user: { username: "future-cycle", displayName: "Future Cycle", memberStatus: "free" },
-    credential: {
-      id: "credential-future-cycle",
-      passwordHash: "hash",
-      hashVersion: "scrypt-v1",
-      passwordChangedAt: now.toISOString()
-    },
-    creditBucket: {
-      id: "bucket-future-cycle-registration",
-      sourceType: "registration",
-      creditType: "promotional",
-      originalAmount: 50,
-      remainingAmount: 50,
-      validFrom: now.toISOString(),
-      validUntil: new Date("2026-09-22T00:00:00.000Z").toISOString(),
-      priority: 10,
-      createdAt: now.toISOString(),
-      updatedAt: now.toISOString()
-    },
-    ledgerEntry: {
-      id: "ledger-future-cycle-registration",
-      entryType: "grant",
-      amount: 50,
-      balanceAfter: 50,
-      sourceRefType: "registration",
-      label: "Registration Credit Grant",
-      createdAt: now.toISOString()
-    },
-    session: {
-      id: "session-future-cycle",
-      tokenHash: "future-cycle-token-hash",
-      slidingExpiresAt: new Date("2026-07-24T00:00:00.000Z").toISOString(),
-      absoluteExpiresAt: new Date("2026-09-22T00:00:00.000Z").toISOString(),
-      createdAt: now.toISOString(),
-      updatedAt: now.toISOString()
-    }
-  });
-  await futureRepositories.billing.createMembershipCycle({
-    id: "cycle-future-smoke",
-    userId: futureUser.user.id,
-    planCode: "pro-monthly",
-    cycleStart: new Date("2026-07-24T00:00:00.000Z").toISOString(),
-    cycleEnd: new Date("2026-08-24T00:00:00.000Z").toISOString(),
-    status: "active",
-    hdDownloadsUsed: 0,
-    hdFairUseCap: 300,
-    createdAt: now.toISOString(),
-    updatedAt: now.toISOString()
-  });
-  expect((await futureRepositories.account.getCurrentAccount(futureUser.user.id)).memberStatus === "free", "future membership cycles should not activate Pro before cycleStart");
-
   const download = await repositories.billing.createDownloadEvent({
     id: "download-smoke",
     assetId: asset.id,
     userId,
     downloadType: "hd_no_watermark",
     creditCost: 0,
-    proFairUseApplied: true,
-    membershipCycleId: cycle.id,
     createdAt: now.toISOString()
   });
   expect((await repositories.billing.listDownloadEvents(userId)).some(item => item.id === download.id), "Prisma adapter should create/list download events");

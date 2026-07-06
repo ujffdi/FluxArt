@@ -15,15 +15,12 @@ enum UserStatus {
 enum MemberStatus {
   free
   credit_pack
-  pro_trial
-  pro
 }
 
 enum CreditSourceType {
   registration
   daily_free
   purchased
-  membership
   adjustment
 }
 
@@ -135,7 +132,6 @@ model User {
   tasks            ImageTask[]
   assets           ImageAsset[]
   downloads        DownloadEvent[]
-  membershipCycles MembershipCycle[]
 
   @@map("users")
 }
@@ -192,12 +188,10 @@ model CreditBucket {
   validUntil        DateTime?        @map("valid_until")
   priority          Int
   sourceOrderId     String?          @map("source_order_id") @db.VarChar(191)
-  membershipCycleId String?          @map("membership_cycle_id") @db.VarChar(191)
   createdAt         DateTime         @default(now()) @map("created_at")
   updatedAt         DateTime         @updatedAt @map("updated_at")
   user              User             @relation(fields: [userId], references: [id])
   sourceOrder       Order?           @relation(fields: [sourceOrderId], references: [id])
-  membershipCycle   MembershipCycle? @relation(fields: [membershipCycleId], references: [id])
   ledgerEntries     CreditLedgerEntry[]
 
   @@index([userId, priority, validUntil])
@@ -260,42 +254,6 @@ model CreditPackSku {
   @@map("credit_pack_skus")
 }
 
-model MembershipPlan {
-  id                 String   @id @default(cuid()) @db.VarChar(191)
-  code               String   @unique @db.VarChar(64)
-  displayName        String   @map("display_name") @db.VarChar(120)
-  monthlyPriceCents  Int      @map("monthly_price_cents")
-  monthlyCreditGrant Int      @map("monthly_credit_grant")
-  hdFairUseCap       Int      @map("hd_fair_use_cap")
-  active             Boolean  @default(true)
-  createdAt          DateTime @default(now()) @map("created_at")
-  updatedAt          DateTime @updatedAt @map("updated_at")
-  cycles             MembershipCycle[]
-
-  @@map("membership_plans")
-}
-
-model MembershipCycle {
-  id           String      @id @default(cuid()) @db.VarChar(191)
-  userId       String      @map("user_id") @db.VarChar(191)
-  planId       String      @map("plan_id") @db.VarChar(191)
-  orderId      String?     @map("order_id") @db.VarChar(191)
-  cycleStart   DateTime    @map("cycle_start")
-  cycleEnd     DateTime    @map("cycle_end")
-  status       String      @default("active") @db.VarChar(32)
-  hdDownloadsUsed Int      @default(0) @map("hd_downloads_used")
-  hdFairUseCap    Int      @default(300) @map("hd_fair_use_cap")
-  createdAt    DateTime    @default(now()) @map("created_at")
-  updatedAt    DateTime    @updatedAt @map("updated_at")
-  user         User        @relation(fields: [userId], references: [id])
-  plan         MembershipPlan @relation(fields: [planId], references: [id])
-  order        Order?      @relation(fields: [orderId], references: [id])
-  buckets      CreditBucket[]
-
-  @@index([userId, cycleEnd])
-  @@map("membership_cycles")
-}
-
 model Order {
   id                 String            @id @default(cuid()) @db.VarChar(191)
   userId             String            @map("user_id") @db.VarChar(191)
@@ -312,7 +270,6 @@ model Order {
   updatedAt          DateTime          @updatedAt @map("updated_at")
   user               User              @relation(fields: [userId], references: [id])
   buckets            CreditBucket[]
-  membershipCycles   MembershipCycle[]
   notifications      PaymentNotification[]
 
   @@map("orders")
@@ -434,7 +391,6 @@ model ImageAsset {
   watermark                       Boolean            @default(true)
   hd                              Boolean            @default(false)
   entitlementSnapshotJson         Json?              @map("entitlement_snapshot_json")
-  commercialAuthorizationStatement String?           @map("commercial_authorization_statement") @db.VarChar(512)
   deletedAt                       DateTime?          @map("deleted_at")
   createdAt                       DateTime           @default(now()) @map("created_at")
   updatedAt                       DateTime           @updatedAt @map("updated_at")
@@ -467,8 +423,6 @@ model DownloadEvent {
   userId              String       @map("user_id") @db.VarChar(191)
   downloadType        DownloadType @map("download_type")
   creditCost          Int          @map("credit_cost")
-  proFairUseApplied   Boolean      @default(false) @map("pro_fair_use_applied")
-  membershipCycleId   String?      @map("membership_cycle_id") @db.VarChar(191)
   createdAt           DateTime     @default(now()) @map("created_at")
   asset               ImageAsset   @relation(fields: [assetId], references: [id])
   user                User         @relation(fields: [userId], references: [id])

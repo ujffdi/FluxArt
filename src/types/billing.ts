@@ -1,6 +1,6 @@
 import type { AccountEntitlement } from "@/types/image";
 
-export type BillingPlanId = "credits-500" | "credits-1500" | "credits-5000" | "pro-monthly";
+export type BillingPlanId = "credits-500" | "credits-1500" | "credits-5000";
 
 export interface BillingOrder {
   orderId: string;
@@ -22,5 +22,5 @@ export interface BillingPlan {
   displayName: string;
   credits: number;
   amountCents: number;
-  kind: "credit_pack" | "membership";
+  kind: "credit_pack";
 }

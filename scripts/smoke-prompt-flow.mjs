@@ -100,9 +100,8 @@ async function run() {
         userId: "usr-prompt-flow",
         username: "prompt_flow",
         displayName: "Prompt Flow",
-        memberStatus: "pro",
+        memberStatus: "credit_pack",
         credits: 999,
-        proDaysRemaining: 30,
         canUseOutpaint: true,
         canDownloadHd: true,
         canDownloadWithoutWatermark: true

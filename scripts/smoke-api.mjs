@@ -318,7 +318,7 @@ async function runSmoke() {
   expect(createdTask.body.data.task.modelProvider === "agnes", "create task should use agnes provider by default");
   expect(createdTask.body.data.task.modelName === "agnes-image-2.1-flash", "create task should use agnes-image-2.1-flash by default");
   expect(createdTask.body.data.task.status === "queued", "created tasks should start in queued state");
-  expect(createdTask.body.data.task.priority === 100, "pro trial task creation should store priority 100");
+  expect(createdTask.body.data.task.priority === 50, "credit pack task creation should store priority 50");
   expect(typeof createdTask.body.data.task.creditHoldId === "string", "created tasks should include a credit hold id");
 
   if (adminSecret) {
@@ -410,10 +410,6 @@ async function runSmoke() {
   expect(credits.body.data.credits.recentChanges.some(entry => entry.label === "Generation Credit Hold" && entry.amount === -10), "demo task creation should write a hold ledger entry");
   expect(!credits.body.data.credits.recentChanges.some(entry => entry.label === "Generation Credit Spend" && entry.amount === -10), "task creation should not write spend entries before approved usable output");
 
-  const membership = await request("/api/account/membership");
-  expectStatus(membership, 200, "account membership");
-  expect(membership.body.data.membership.memberStatus === "pro_trial", "membership should return demo pro trial status");
-
   const order = await request("/api/billing/orders", {
     method: "POST",
     body: JSON.stringify({ planId: "credits-1500" })
@@ -427,20 +423,6 @@ async function runSmoke() {
   });
   expectStatus(creditsOrder, 200, "create credits order");
   expect(creditsOrder.body.data.order.planId === "credits-5000", "credits order should preserve the selected credits plan");
-
-  const membershipOrder = await request("/api/orders/membership", {
-    method: "POST",
-    body: JSON.stringify({ planId: "pro-monthly" })
-  });
-  expectStatus(membershipOrder, 200, "create membership order");
-  expect(membershipOrder.body.data.order.memberStatusAfterPayment === "pro", "membership order should upgrade member status after payment");
-
-  const invalidMembershipOrder = await request("/api/orders/membership", {
-    method: "POST",
-    body: JSON.stringify({ planId: "credits-1500" })
-  });
-  expectStatus(invalidMembershipOrder, 400, "invalid membership order plan");
-  expect(invalidMembershipOrder.body.data.errorCode === "MEMBERSHIP_PLAN_REQUIRED", "invalid membership order should return MEMBERSHIP_PLAN_REQUIRED");
 
   const invalidOrder = await request("/api/billing/orders", {
     method: "POST",
@@ -511,7 +493,6 @@ async function runSmoke() {
   expect(uploadedAsset.status === "succeeded", "visible asset upload should be immediately usable");
   expect(!uploadedAsset.taskId, "visible asset upload should not create a task id");
   expect(!uploadedAsset.taskType, "visible asset upload should not pretend to have a generation task type");
-  expect(!uploadedAsset.commercialAuthorizationStatement, "visible asset upload should not expose commercial authorization");
   expect(uploadedAsset.width === 36 && uploadedAsset.height === 28, "visible asset upload should store decoded dimensions");
   const uploadedAssetDetail = await request(`/api/image/assets/${uploadedAsset.id}`);
   expectStatus(uploadedAssetDetail, 200, "uploaded asset detail");
@@ -665,88 +646,22 @@ async function runSmoke() {
   expect(creditsAfterRun.body.data.credits.credits === 550, "final spend should not double-deduct already held credits");
   expect(creditsAfterRun.body.data.credits.recentChanges.some(entry => entry.label === "Generation Credit Spend" && entry.amount === -10), "approved usable output should write a spend ledger entry");
 
-  const nonProDownload = await request(`/api/image/assets/${generatedAssetId}/download`, { method: "POST" });
-  expectStatus(nonProDownload, 200, "non-Pro HD download");
-  expect(nonProDownload.body.data.decision.quality === "hd" && nonProDownload.body.data.decision.watermark === false, "non-Pro downloads should provide HD no-watermark output");
-  expect(nonProDownload.body.data.decision.costCredits === 5, "non-Pro HD no-watermark downloads should cost 5 credits");
-  expect(nonProDownload.body.data.decision.downloadUrl === `/api/image/assets/${generatedAssetId}/download`, "non-Pro download should return the owned attachment endpoint");
-  await expectAssetDownload(generatedAssetId, "non-Pro HD download file");
-  const creditsAfterNonProDownload = await request("/api/account/credits");
-  expectStatus(creditsAfterNonProDownload, 200, "credits after non-Pro download");
-  expect(creditsAfterNonProDownload.body.data.credits.credits === 545, "non-Pro HD no-watermark download should spend 5 credits");
-  expect(creditsAfterNonProDownload.body.data.credits.recentChanges.some(entry => entry.label === "Download Credit Spend" && entry.amount === -5), "download spend should write a ledger entry");
-  const repeatedNonProDownload = await request(`/api/image/assets/${generatedAssetId}/download`, { method: "POST" });
-  expectStatus(repeatedNonProDownload, 200, "repeat non-Pro HD download");
-  expect(repeatedNonProDownload.body.data.decision.costCredits === 0, "already unlocked non-Pro downloads should not spend credits again");
-  const creditsAfterRepeatedNonProDownload = await request("/api/account/credits");
-  expectStatus(creditsAfterRepeatedNonProDownload, 200, "credits after repeat non-Pro download");
-  expect(creditsAfterRepeatedNonProDownload.body.data.credits.credits === 545, "repeat non-Pro HD download should not spend credits again");
-
-  const proOrder = await request("/api/orders/membership", {
-    method: "POST",
-    body: JSON.stringify({ planId: "pro-monthly" })
-  });
-  expectStatus(proOrder, 200, "create Pro membership order");
-  expect(proOrder.body.data.order.paymentUrl.includes("outTradeNo="), "Pro membership order should include a server-created payment URL");
-  const proNotifyParams = {
-    pid: "mock-merchant",
-    out_trade_no: proOrder.body.data.order.outTradeNo,
-    trade_no: `provider_pro_${Date.now().toString(36)}`,
-    trade_status: "TRADE_SUCCESS",
-    money: "69.00"
-  };
-  const signedProNotifyParams = { ...proNotifyParams, sign: signEpayParams(proNotifyParams), sign_type: "MD5" };
-  const proNotify = await request("/api/payments/epay/notify", {
-    method: "POST",
-    body: new URLSearchParams(signedProNotifyParams),
-    headers: { "Content-Type": "application/x-www-form-urlencoded" }
-  });
-  expectStatus(proNotify, 200, "Pro membership notify");
-  expect(proNotify.body === "success", "successful Pro Epay notify should return success");
-  const membershipAfterPro = await request("/api/account/membership");
-  expectStatus(membershipAfterPro, 200, "membership after Pro notify");
-  expect(membershipAfterPro.body.data.membership.memberStatus === "pro", "verified Pro notify should activate Pro membership");
-  expect(membershipAfterPro.body.data.membership.includedHdDownloadsRemaining === 300, "new Pro cycle should include 300 HD no-watermark downloads");
-  expect(typeof membershipAfterPro.body.data.membership.commercialAuthorizationStatement === "string", "Pro membership should expose commercial authorization statement");
-  const creditsAfterPro = await request("/api/account/credits");
-  expectStatus(creditsAfterPro, 200, "credits after Pro notify");
-  expect(creditsAfterPro.body.data.credits.credits === 1545, "verified Pro notify should grant 1000 monthly promotional credits");
-  expect(creditsAfterPro.body.data.credits.groups.some(group => group.label.includes("membership") && group.amount === 1000), "Pro notify should add a membership credit bucket");
-  expect(creditsAfterPro.body.data.credits.recentChanges.some(entry => entry.label === "Pro Membership Monthly Credit Grant" && entry.amount === 1000), "Pro notify should write a membership credit ledger entry");
-  const duplicateProNotify = await request("/api/payments/epay/notify", {
-    method: "POST",
-    body: new URLSearchParams(signedProNotifyParams),
-    headers: { "Content-Type": "application/x-www-form-urlencoded" }
-  });
-  expectStatus(duplicateProNotify, 200, "duplicate Pro membership notify");
-  const creditsAfterDuplicatePro = await request("/api/account/credits");
-  expectStatus(creditsAfterDuplicatePro, 200, "credits after duplicate Pro notify");
-  expect(creditsAfterDuplicatePro.body.data.credits.credits === 1545, "duplicate Pro notify should not duplicate monthly credits");
-
-  const proTask = await request("/api/image/tasks", {
-    method: "POST",
-    body: JSON.stringify({ taskType: "t2i", prompt: "api smoke pro generated asset", count: 1, size: "1024x1024" })
-  });
-  expectStatus(proTask, 200, "Pro create task");
-  expect(proTask.body.data.task.priority === 100, "Pro tasks should use priority 100");
-  const ranProTask = await request(`/api/image/tasks/${proTask.body.data.task.id}`, { method: "POST" });
-  expectStatus(ranProTask, 200, "run Pro task");
-  const proGeneratedAssetId = ranProTask.body.data.task.resultAssetIds[0];
-  const proGeneratedAsset = await request(`/api/image/assets/${proGeneratedAssetId}`);
-  expectStatus(proGeneratedAsset, 200, "Pro generated asset detail");
-  expect(proGeneratedAsset.body.data.detail.asset.entitlementSnapshot?.memberStatus === "pro", "Pro-generated assets should store an entitlement snapshot");
-  expect(typeof proGeneratedAsset.body.data.detail.asset.commercialAuthorizationStatement === "string", "Pro-generated assets should store commercial authorization");
-  const proDownload = await request(`/api/image/assets/${proGeneratedAssetId}/download`, { method: "POST" });
-  expectStatus(proDownload, 200, "Pro HD download");
-  expect(proDownload.body.data.decision.costCredits === 0 && proDownload.body.data.decision.fairUseApplied === true, "Pro downloads within fair-use cap should cost 0 credits");
-  expect(proDownload.body.data.decision.downloadUrl === `/api/image/assets/${proGeneratedAssetId}/download`, "Pro download should return the owned attachment endpoint");
-  await expectAssetDownload(proGeneratedAssetId, "Pro HD download file");
-  const membershipAfterProDownload = await request("/api/account/membership");
-  expectStatus(membershipAfterProDownload, 200, "membership after Pro download");
-  expect(membershipAfterProDownload.body.data.membership.includedHdDownloadsRemaining === 299, "Pro HD download should consume one included download");
-  const creditsAfterProDownload = await request("/api/account/credits");
-  expectStatus(creditsAfterProDownload, 200, "credits after Pro download");
-  expect(creditsAfterProDownload.body.data.credits.credits === 1535, "Pro fair-use download should not spend credits beyond the Pro task cost");
+  const hdDownload = await request(`/api/image/assets/${generatedAssetId}/download`, { method: "POST" });
+  expectStatus(hdDownload, 200, "HD download");
+  expect(hdDownload.body.data.decision.quality === "hd" && hdDownload.body.data.decision.watermark === false, "HD downloads should provide no-watermark output");
+  expect(hdDownload.body.data.decision.costCredits === 5, "HD no-watermark downloads should cost 5 credits");
+  expect(hdDownload.body.data.decision.downloadUrl === `/api/image/assets/${generatedAssetId}/download`, "HD download should return the owned attachment endpoint");
+  await expectAssetDownload(generatedAssetId, "HD download file");
+  const creditsAfterHdDownload = await request("/api/account/credits");
+  expectStatus(creditsAfterHdDownload, 200, "credits after HD download");
+  expect(creditsAfterHdDownload.body.data.credits.credits === 545, "HD no-watermark download should spend 5 credits");
+  expect(creditsAfterHdDownload.body.data.credits.recentChanges.some(entry => entry.label === "Download Credit Spend" && entry.amount === -5), "download spend should write a ledger entry");
+  const repeatedHdDownload = await request(`/api/image/assets/${generatedAssetId}/download`, { method: "POST" });
+  expectStatus(repeatedHdDownload, 200, "repeat HD download");
+  expect(repeatedHdDownload.body.data.decision.costCredits === 0, "already unlocked HD downloads should not spend credits again");
+  const creditsAfterRepeatedHdDownload = await request("/api/account/credits");
+  expectStatus(creditsAfterRepeatedHdDownload, 200, "credits after repeat HD download");
+  expect(creditsAfterRepeatedHdDownload.body.data.credits.credits === 545, "repeat HD download should not spend credits again");
 
   const returnOrder = await request("/api/orders/credits", {
     method: "POST",
@@ -768,7 +683,7 @@ async function runSmoke() {
   expect(returnResult.response.headers.get("location")?.includes("/workspace/billing?payment=success"), "signed payment return should redirect with success state");
   const creditsAfterReturn = await request("/api/account/credits");
   expectStatus(creditsAfterReturn, 200, "credits after payment return");
-  expect(creditsAfterReturn.body.data.credits.credits === 2035, "signed payment return should fulfill the credit pack once");
+  expect(creditsAfterReturn.body.data.credits.credits === 1045, "signed payment return should fulfill the credit pack once");
 
   const uploadedSourceTask = await request("/api/image/tasks", {
     method: "POST",

@@ -4,8 +4,7 @@ export const account: AccountEntitlement = {
   userId: "usr_flux_001",
   displayName: "林澈",
   credits: 1280,
-  memberStatus: "pro_trial",
-  proDaysRemaining: 5,
+  memberStatus: "credit_pack",
   canUseOutpaint: true,
   canDownloadHd: true,
   canDownloadWithoutWatermark: true
