@@ -144,7 +144,7 @@ function accountFromUser(user: DbRecord, credits: number, username: string, acti
 function assetFromRecord(record: DbRecord): ImageAsset {
   const reviewStatus = asString(record.reviewStatus, "approved");
   const deletedAt = record.deletedAt ? toIso(record.deletedAt) : undefined;
-  const status = reviewStatus === "approved" ? "succeeded" : reviewStatus === "rejected" ? "failed" : "reviewing";
+  const status = reviewStatus === "approved" || reviewStatus === "skipped" ? "succeeded" : reviewStatus === "rejected" ? "failed" : "reviewing";
 
   return {
     id: asString(record.id),

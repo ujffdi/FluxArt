@@ -126,6 +126,21 @@ async function assertLightThemeHintContrast(page) {
   if (failures.length) fail(`light theme hint contrast below ${minimumTextContrast}: ${failures.join("; ")}`);
 }
 
+async function assertAiStudioIsNotThemeToggle(page) {
+  await page.goto(`${baseUrl}/workspace/image`, { waitUntil: "networkidle" });
+  await page.evaluate(() => {
+    document.documentElement.dataset.theme = "light";
+  });
+
+  const themeToggleCount = await page.getByRole("button", { name: "AI Studio" }).count();
+  if (themeToggleCount > 0) fail("AI Studio should be a section label, not a theme toggle button");
+
+  const beforeTheme = await page.evaluate(() => document.documentElement.dataset.theme || "");
+  await page.getByText("AI Studio", { exact: true }).click();
+  const afterTheme = await page.evaluate(() => document.documentElement.dataset.theme || "");
+  if (afterTheme !== beforeTheme) fail(`AI Studio changed theme from ${beforeTheme || "(unset)"} to ${afterTheme || "(unset)"}`);
+}
+
 function startServerIfNeeded() {
   if (explicitBaseUrl) return;
   if (!existsSync(nextBin)) fail("Next.js binary not found. Run npm install before npm run smoke:browser.");
@@ -184,6 +199,7 @@ async function run() {
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage();
+    await assertAiStudioIsNotThemeToggle(page);
     await assertLightThemeHintContrast(page);
 
     await page.goto(`${baseUrl}/workspace/account`);
@@ -266,6 +282,14 @@ async function run() {
     await page.goto(`${baseUrl}/workspace/image`);
     await page.getByText(generatedAsset.id).waitFor({ timeout: 10000 });
     await page.getByText("已保存到资产中心").waitFor({ timeout: 10000 });
+    await page.getByRole("button", { name: "下载" }).first().click();
+    await page.getByText("积分解锁确认").waitFor({ timeout: 10000 });
+    const downloadPromise = page.waitForEvent("download");
+    await page.getByRole("button", { name: "确认并下载" }).click();
+    const download = await downloadPromise;
+    const downloadFailure = await download.failure();
+    if (downloadFailure) fail(`browser download failed: ${downloadFailure}`);
+    if (!download.suggestedFilename().endsWith(".png")) fail(`browser download should save a PNG file, received ${download.suggestedFilename()}`);
 
     const imageToImagePrompt = `browser smoke image-to-image result ${Date.now()}`;
     const imageToImageTaskPayload = await page.evaluate(async ({ prompt, sourceAssetId }) => {

@@ -13,12 +13,12 @@ const mockPaymentEnv = {
   MAPAY_MERCHANT_ID: "mock-merchant",
   MAPAY_SIGNING_SECRET: "mock-epay-secret",
   MAPAY_NOTIFY_URL: `http://127.0.0.1:${port}/api/payments/mapay/notify`,
-  MAPAY_RETURN_URL: `http://127.0.0.1:${port}/workspace/billing`,
+  MAPAY_RETURN_URL: `http://127.0.0.1:${port}/api/payments/mapay/return`,
   EPAY_API_URL: "",
   EPAY_MERCHANT_ID: "mock-merchant",
   EPAY_SIGNING_SECRET: "mock-epay-secret",
   EPAY_NOTIFY_URL: `http://127.0.0.1:${port}/api/payments/epay/notify`,
-  EPAY_RETURN_URL: `http://127.0.0.1:${port}/workspace/billing`
+  EPAY_RETURN_URL: `http://127.0.0.1:${port}/api/payments/epay/return`
 };
 
 let serverProcess;

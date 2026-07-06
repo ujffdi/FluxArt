@@ -518,6 +518,18 @@ export async function decideDownload(assetId: string, userId?: string): Promise<
     };
   }
 
+  if (asset.downloadState === "hd") {
+    return {
+      assetId,
+      allowed: true,
+      quality: "hd",
+      watermark: false,
+      costCredits: 0,
+      reason: "该图片已解锁高清无水印下载",
+      downloadUrl: asset.imageUrl
+    };
+  }
+
   const activeCycle = account.memberStatus === "pro" ? await activeMembershipCycle(account.userId) : undefined;
   if (activeCycle && activeCycle.hdDownloadsUsed < activeCycle.hdFairUseCap) {
     return {

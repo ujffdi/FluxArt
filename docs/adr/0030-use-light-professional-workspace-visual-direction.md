@@ -1,0 +1,3 @@
+# Use an AI-native creative workspace visual direction
+
+FluxArt's workspace redesign will use the visual direction proven in `.tmp/fluxart-ai-native-preview-desktop.png`: an AI-native creative workspace with a pale pink/lavender canvas, rounded glassy panels, a left creation input rail, a central live result studio, right-side generation queue and recent assets, and gradient purple-to-pink primary actions. We are choosing this over the stricter black-and-white or plain professional workspace because FluxArt needs to feel like an AI creation studio while still keeping the repeated-use workbench structure efficient and scannable.

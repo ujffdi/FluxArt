@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createEpayPaymentUrl, epayMerchantId, formatEpayAmount, readEpayNotifyParams, verifyEpaySignature } from "@/server/billing/epay-adapter";
+import { createEpayPaymentUrl, epayMerchantId, readEpayNotifyParams, verifyEpaySignature } from "@/server/billing/epay-adapter";
 import { billingPlans } from "@/server/billing/plans";
 import { getRepositories } from "@/server/data/repositories";
 import type { BillingOrder, BillingPlanId } from "@/types/billing";
@@ -71,6 +71,13 @@ function iso(date = new Date()) {
   return date.toISOString();
 }
 
+function epayAmountMatches(receivedAmount: string | undefined, expectedAmountCents: number) {
+  if (!receivedAmount) return false;
+  const normalized = Number(receivedAmount);
+  if (!Number.isFinite(normalized)) return false;
+  return Math.round(normalized * 100) === expectedAmountCents;
+}
+
 function addOneMonth(date: Date) {
   const next = new Date(date.getTime());
   next.setUTCMonth(next.getUTCMonth() + 1);
@@ -107,7 +114,7 @@ async function readVerifiedEpayOrder(input: URLSearchParams | Record<string, unk
     throw new PaymentNotificationError("local order was not found", "ORDER_NOT_FOUND", 404);
   }
   const plan = billingPlans[order.planId];
-  if (params.money !== formatEpayAmount(order.amountCents)) {
+  if (!epayAmountMatches(params.money, order.amountCents)) {
     await repositories.billing.updateOrder(order.id, { fulfillmentStatus: "retryable" });
     throw new PaymentNotificationError("Epay amount does not match local order", "EPAY_AMOUNT_MISMATCH");
   }

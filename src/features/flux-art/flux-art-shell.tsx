@@ -130,6 +130,87 @@ function taskTimestamp(task: ImageGenerationTask) {
   return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
+function isActiveTask(task: ImageGenerationTask) {
+  return task.status === "queued" || task.status === "running" || task.status === "storing" || task.status === "reviewing";
+}
+
+function taskStatusLabel(task: ImageGenerationTask) {
+  if (isActiveTask(task)) return "已提交";
+  if (task.status === "succeeded") return "已完成";
+  if (task.status === "failed") return "失败";
+  if (task.status === "refunded") return "已退回";
+  return task.status;
+}
+
+type QueueTone = "ok" | "wait" | "bad";
+
+interface QueueCard {
+  id: string;
+  title: string;
+  prompt: string;
+  code: string;
+  status: string;
+  tone: QueueTone;
+  note: string;
+}
+
+function queueCardFromTask(task: ImageGenerationTask): QueueCard {
+  const statusMap: Record<ImageGenerationTask["status"], { label: string; tone: QueueTone; note: string }> = {
+    queued: { label: "等待中", tone: "wait", note: "任务已进入队列，稍后自动同步结果。" },
+    running: { label: "生成中", tone: "wait", note: "服务端正在处理，完成后会更新结果区。" },
+    storing: { label: "保存中", tone: "wait", note: "结果生成完成，正在写入资产。" },
+    reviewing: { label: "审核中", tone: "wait", note: "结果已生成，正在进行内容审核。" },
+    succeeded: {
+      label: "已保存",
+      tone: "ok",
+      note: task.resultAssetIds.length > 0 ? `已生成 ${task.resultAssetIds.length} 个结果，可在资产中心查看。` : "任务已完成，正在同步资产信息。"
+    },
+    failed: { label: "未完成", tone: "bad", note: task.errorMessage || "任务未完成，请调整提示词后重试。" },
+    refunded: { label: "已退回", tone: "bad", note: "任务已结束，预扣积分已退回。" }
+  };
+  const status = statusMap[task.status];
+
+  return {
+    id: task.id,
+    title: `${taskStatusLabel(task)} · ${task.id}`,
+    prompt: task.prompt,
+    code: `model=${task.modelProvider}/${task.modelName} · chargedCredits=${task.chargedCredits}`,
+    status: status.label,
+    tone: status.tone,
+    note: status.note
+  };
+}
+
+const demoQueueCards: QueueCard[] = [
+  {
+    id: "task_9a21",
+    title: "香蕉主图 · 2 张",
+    prompt: "优化产品主体光影与背景留白",
+    code: "task_9a21 · model=gpt-image-2",
+    status: "生成中",
+    tone: "wait",
+    note: "服务端正在处理，完成后会更新结果区。"
+  },
+  {
+    id: "task_9a22",
+    title: "详情页横图",
+    prompt: "等待上一批任务释放并发额度",
+    code: "task_9a22 · next",
+    status: "等待中",
+    tone: "wait",
+    note: "任务已进入队列，稍后自动同步结果。"
+  },
+  {
+    id: "task_9a03",
+    title: "室内空间背景",
+    prompt: "商业摄影背景已生成",
+    code: "task_9a03 · 4 分钟前",
+    status: "已保存",
+    tone: "ok",
+    note: "已生成 2 个结果，可在资产中心查看。"
+  }
+];
+
 function assetOriginLabel(origin: AssetOrigin) {
   return origin === "uploaded" ? "用户上传" : "AI 生成";
 }
@@ -144,6 +225,15 @@ function assetTypeLabel(asset: ImageAsset) {
 function assetSourceText(asset: ImageAsset) {
   if (asset.origin === "uploaded") return "用户上传资产";
   return asset.taskId ? `来源任务 ${asset.taskId}` : "来源任务已缺失";
+}
+
+function AssetImage({ asset, className }: { asset: ImageAsset; className: string }) {
+  return (
+    <div className={className}>
+      {/* eslint-disable-next-line @next/next/no-img-element -- Asset URLs are dynamic user/storage URLs outside Next image configuration. */}
+      <img src={asset.imageUrl} alt={asset.title} loading="lazy" />
+    </div>
+  );
 }
 
 function pickTaskForDisplay(sessionTask: ImageGenerationTask, serverTask: ImageGenerationTask) {
@@ -200,6 +290,7 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
   const [customWidth, setCustomWidth] = useState(1024);
   const [customHeight, setCustomHeight] = useState(1024);
   const [stylePreset, setStylePreset] = useState(stylePresetOptions[0]);
+  const reconciliationInFlight = useRef(false);
 
   const credits = creditsSummary?.credits ?? 0;
   const hasServerSession = authAccount !== null;
@@ -211,23 +302,24 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
   );
 
   const visibleTasks = useMemo(() => mergeVisibleTasks(sessionTasks, serverTasks), [sessionTasks, serverTasks]);
+  const activeTaskIds = useMemo(() => sessionTasks.filter(isActiveTask).map(task => task.id).sort().join("|"), [sessionTasks]);
 
   const workspaceResult = useMemo(() => {
     const assetById = new Map(serverAssets.map(asset => [asset.id, asset]));
     const completedTask = findLatestTask(
-      visibleTasks,
+      sessionTasks,
       task => task.status === "succeeded" && task.resultAssetIds.some(assetId => assetById.has(assetId))
     );
     const pendingCompletedTask = findLatestTask(
-      visibleTasks,
+      sessionTasks,
       task => task.status === "succeeded" && task.resultAssetIds.length > 0 && !task.resultAssetIds.some(assetId => assetById.has(assetId))
     );
     const activeTask = findLatestTask(
-      visibleTasks,
-      task => task.status === "queued" || task.status === "running" || task.status === "storing" || task.status === "reviewing"
+      sessionTasks,
+      isActiveTask
     );
     const failedTask = findLatestTask(
-      visibleTasks,
+      sessionTasks,
       task => task.status === "failed" || task.status === "refunded"
     );
 
@@ -247,7 +339,7 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
       assets: [] as ImageAsset[],
       pendingAssetIds: pendingCompletedTask?.resultAssetIds || []
     };
-  }, [serverAssets, visibleTasks]);
+  }, [serverAssets, sessionTasks]);
 
   const clearSessionOwnedState = useCallback(function clearSessionOwnedState() {
     setAuthAccount(null);
@@ -292,7 +384,7 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
           clearSessionOwnedState();
           useImageWorkspaceStore.getState().setSessionState("guest");
         }
-        setServerError(errorMessage(error, "请登录后加载你的资产、任务和积分数据"));
+        setServerError(workspaceErrorMessage(error, "登录后会同步你的资产、任务和积分数据。"));
       } finally {
         if (active) setSessionHydrated(true);
       }
@@ -306,8 +398,35 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
   }, [clearSessionOwnedState, loadSessionOwnedState]);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = store.theme;
-  }, [store.theme]);
+    if (!hasServerSession || !authAccount || !activeTaskIds) return;
+
+    let cancelled = false;
+    const account = authAccount;
+
+    async function reconcileActiveTasks() {
+      if (reconciliationInFlight.current) return;
+      reconciliationInFlight.current = true;
+
+      try {
+        await Promise.all(activeTaskIds.split("|").map(taskId => runImageTask(taskId).then(upsertSessionTask)));
+        if (!cancelled) await loadSessionOwnedState(account);
+      } catch (error) {
+        if (!cancelled) setServerError(errorMessage(error, "任务状态同步失败，请稍后刷新"));
+      } finally {
+        reconciliationInFlight.current = false;
+      }
+    }
+
+    void reconcileActiveTasks();
+    const timer = window.setInterval(() => {
+      void reconcileActiveTasks();
+    }, 5000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeTaskIds, authAccount, hasServerSession, loadSessionOwnedState]);
 
   useEffect(() => {
     if (!store.toast) return;
@@ -365,13 +484,14 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
         upsertSessionTask(updatedTask);
         if (updatedTask.status === "succeeded") {
           store.showToast(`${label}完成：${updatedTask.id}`);
-          void loadSessionOwnedState(authAccount || undefined);
         } else if (updatedTask.status === "failed" || updatedTask.status === "refunded") {
           store.showToast(`${label}失败：${updatedTask.errorMessage || "请稍后重试"}`);
         }
+        void loadSessionOwnedState(authAccount || undefined);
       })
       .catch(error => {
         store.showToast(`${label}执行失败：${workspaceErrorMessage(error, "请稍后重试")}`);
+        void loadSessionOwnedState(authAccount || undefined);
       });
   }
 
@@ -526,8 +646,6 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
         activePage={activePage}
         sessionLabel={hasServerSession ? `已登录 · ${authAccount.displayName || "Flux Art 用户"}` : sessionState === "expired" ? "登录已过期" : "游客模式"}
         credits={credits}
-        theme={store.theme}
-        onToggleTheme={() => store.setTheme(store.theme === "light" ? "dark" : "light")}
         onAuthClick={() => (hasServerSession ? setShowLogout(true) : setAuthModal(""))}
       />
       {activePage === "workspace" && (
@@ -563,10 +681,6 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
             store.setSelectedAssetId(assetId);
             store.setGenerationMode("img");
             store.showToast("已把结果设为参考图，可继续图生图");
-          }}
-          onShortcutToImageMode={() => {
-            store.setGenerationMode("img");
-            store.showToast("已切换到图生图：请确认 sourceAssetId 或上传参考图后再提交");
           }}
           visibleTasks={visibleTasks}
           resultTask={workspaceResult.task}
@@ -621,22 +735,18 @@ function Header({
   activePage,
   sessionLabel,
   credits,
-  theme,
-  onToggleTheme,
   onAuthClick
 }: {
   activePage: ProductPage;
   sessionLabel: string;
   credits: number;
-  theme: "dark" | "light";
-  onToggleTheme: () => void;
   onAuthClick: () => void;
 }) {
   return (
     <header className="top">
       <Link className="brand" href="/workspace/image">
         <span className="mark" />
-        <span>Flux Art 生图工作台</span>
+        <span>FluxArt</span>
       </Link>
       <nav className="nav" aria-label="产品导航">
         {navItems.map(item => (
@@ -648,11 +758,11 @@ function Header({
       <div className="wallet">
         <span className="badge">{sessionLabel}</span>
         <span className="badge">积分 {credits.toLocaleString()}</span>
-        <button className="btn" type="button" onClick={onToggleTheme} aria-pressed={theme === "light"}>
-          {theme === "light" ? "深色模式" : "浅色模式"}
-        </button>
-        <button className="btn" type="button" onClick={onAuthClick}>
-          {sessionLabel.startsWith("已登录") ? "退出" : "登录 / 注册"}
+        <span className="btn studio-toggle" aria-label="AI Studio">
+          AI Studio
+        </span>
+        <button className="btn avatar-btn" type="button" onClick={onAuthClick} aria-label={sessionLabel.startsWith("已登录") ? "退出" : "登录 / 注册"}>
+          {sessionLabel.startsWith("已登录") ? "SU" : "登录"}
         </button>
       </div>
     </header>
@@ -688,7 +798,6 @@ function WorkspacePage({
   onUploadAsset,
   onDownload,
   onUseAsSource,
-  onShortcutToImageMode,
   visibleTasks,
   resultTask,
   resultAssets,
@@ -725,7 +834,6 @@ function WorkspacePage({
   onUploadAsset: (file: File) => Promise<void>;
   onDownload: (assetId?: string) => void;
   onUseAsSource: (assetId: string) => void;
-  onShortcutToImageMode: () => void;
   visibleTasks: ImageGenerationTask[];
   resultTask?: ImageGenerationTask;
   resultAssets: ImageAsset[];
@@ -736,29 +844,42 @@ function WorkspacePage({
 }) {
   const imageMode = generationMode === "img";
   return (
-    <section aria-label="AI 生图工作台">
-      <div className="mode" role="tablist" aria-label="生成模式">
-        <button className={!imageMode ? "active" : ""} type="button" role="tab" aria-selected={!imageMode} onClick={() => onModeChange("txt")}>文生图</button>
-        <button className={imageMode ? "active" : ""} type="button" role="tab" aria-selected={imageMode} onClick={() => onModeChange("img")}>图生图</button>
-      </div>
+    <section className="ai-workspace" aria-label="AI 生图工作台">
       <section className="workspace-grid">
-        <aside className="panel">
-          <div className="panel-head"><h2>{imageMode ? "图生图参数" : "文生图参数"}</h2><span className="badge">预计 {imageMode ? 32 : 18} 积分</span></div>
+        <aside className="panel input-panel">
+          <div className="panel-head">
+            <h2>创作输入</h2>
+            <span className="badge">gpt-image-2</span>
+          </div>
           <div className="panel-body">
+            <div className="mode mode-cards" role="tablist" aria-label="生成模式">
+              <button className={!imageMode ? "active" : ""} type="button" role="tab" aria-selected={!imageMode} onClick={() => onModeChange("txt")}>
+                <strong>文生图</strong>
+                <span>Text prompt</span>
+              </button>
+              <button className={imageMode ? "active" : ""} type="button" role="tab" aria-selected={imageMode} onClick={() => onModeChange("img")}>
+                <strong>图生图</strong>
+                <span>Image remix</span>
+              </button>
+            </div>
+            <div className="coach-card">
+              <div><strong>AI prompt coach</strong><span>建议补充镜头焦段、材质关键词和背景留白比例，让生成结果更适合电商主图。</span></div>
+              <span aria-hidden="true">•••</span>
+            </div>
             {imageMode && <UploadField selectedAsset={selectedAsset} onUploadAsset={onUploadAsset} />}
             <div className="field">
-              <label>{imageMode ? "修改方向说明" : "Prompt"}</label>
+              <label>{imageMode ? "修改方向说明" : "提示词"}</label>
               <textarea
-                aria-label={imageMode ? "修改方向说明" : "Prompt"}
+                aria-label={imageMode ? "修改方向说明" : "提示词"}
                 value={imageMode ? imagePrompt : textPrompt}
                 onChange={event => imageMode ? onImagePromptChange(event.target.value) : onTextPromptChange(event.target.value)}
               />
             </div>
             {!imageMode && (
               <div className="field">
-                <label>Negative Prompt</label>
+                <label>负向提示词</label>
                 <textarea
-                  aria-label="Negative Prompt"
+                  aria-label="负向提示词"
                   value={negativePrompt}
                   onChange={event => onNegativePromptChange(event.target.value)}
                 />
@@ -776,7 +897,7 @@ function WorkspacePage({
               </>
             )}
             <div className="field">
-              <label>风格预设</label>
+              <label>风格预设 <span className="small">creative pink</span></label>
               <div className="chips">
                 {stylePresetOptions.map(option => (
                   <button
@@ -791,38 +912,36 @@ function WorkspacePage({
                 ))}
               </div>
             </div>
-            <div className="row">
-              <div className="field">
-                <label>尺寸</label>
-                <select
-                  className="select"
-                  aria-label="尺寸"
-                  value={selectedSize}
-                  onChange={event => {
-                    onSelectedSizeChange(event.target.value);
-                    onCustomSizeChange(event.target.value === "custom");
-                  }}
-                >
-                  <option value="1024x1024">1024 x 1024</option>
-                  <option value="1344x768">1344 x 768</option>
-                  <option value="768x1344">768 x 1344</option>
-                  <option value="custom">手动输入</option>
-                </select>
-              </div>
-              <div className="field"><label>数量</label><select className="select" aria-label="数量" value={generationCount} onChange={event => onGenerationCountChange(Number(event.target.value))}><option value={4}>4 张</option><option value={2}>2 张</option><option value={1}>1 张</option></select></div>
+            <div className="field">
+              <label>画幅</label>
+              <select
+                className="select"
+                aria-label="画幅"
+                value={selectedSize}
+                onChange={event => {
+                  onSelectedSizeChange(event.target.value);
+                  onCustomSizeChange(event.target.value === "custom");
+                }}
+              >
+                <option value="1024x1024">1024 x 1024 · 方图</option>
+                <option value="1344x768">1344 x 768 · 横图</option>
+                <option value="768x1344">768 x 1344 · 竖图</option>
+                <option value="custom">手动输入</option>
+              </select>
             </div>
-            {customSizeVisible && (
+            <div className="size-custom">
               <div className="field">
-                <label>手动尺寸</label>
-                <div className="size-custom">
-                  <input className="input" type="number" aria-label="手动宽度" min="512" max="2048" step="64" value={customWidth} onChange={event => onCustomWidthChange(Number(event.target.value))} />
-                  <input className="input" type="number" aria-label="手动高度" min="512" max="2048" step="64" value={customHeight} onChange={event => onCustomHeightChange(Number(event.target.value))} />
-                </div>
-                <span className="small">支持 512-2048px，建议使用 64 的倍数。</span>
+                <label>宽</label>
+                <input className="input" type="number" aria-label="宽" min="512" max="2048" step="64" value={customSizeVisible ? customWidth : Number(selectedSize.split("x")[0] || 1024)} onChange={event => onCustomWidthChange(Number(event.target.value))} />
               </div>
-            )}
-            <div className="cost"><span>预计消耗 / 当前余额</span><strong>{imageMode ? "32" : "18"} / {credits.toLocaleString()} 积分</strong></div>
-            <button className="btn primary full" type="button" onClick={onGenerate}>生成图片</button>
+              <div className="field">
+                <label>高</label>
+                <input className="input" type="number" aria-label="高" min="512" max="2048" step="64" value={customSizeVisible ? customHeight : Number(selectedSize.split("x")[1] || 1024)} onChange={event => onCustomHeightChange(Number(event.target.value))} />
+              </div>
+            </div>
+            <div className="field"><label>数量</label><select className="select" aria-label="数量" value={generationCount} onChange={event => onGenerationCountChange(Number(event.target.value))}><option value={4}>4 张</option><option value={2}>2 张</option><option value={1}>1 张</option></select></div>
+            <div className="cost"><span>预计消耗</span><strong>{imageMode ? "32" : "18"} / {credits.toLocaleString()} 积分</strong></div>
+            <button className="btn primary full" type="button" onClick={onGenerate}>生成 {generationCount} 张方案</button>
           </div>
         </aside>
         <section className="panel canvas">
@@ -834,7 +953,7 @@ function WorkspacePage({
             onUseAsSource={onUseAsSource}
           />
         </section>
-        <AsideTasks onShortcutToImageMode={onShortcutToImageMode} visibleTasks={visibleTasks} serverError={serverError} />
+        <AsideTasks visibleTasks={visibleTasks} serverError={serverError} />
       </section>
     </section>
   );
@@ -854,7 +973,7 @@ function WorkspaceResultStage({
   onUseAsSource: (assetId: string) => void;
 }) {
   const hasAssets = assets.length > 0;
-  const isActive = task?.status === "queued" || task?.status === "running" || task?.status === "storing" || task?.status === "reviewing";
+  const isActive = task ? isActiveTask(task) : false;
   const isFailed = task?.status === "failed" || task?.status === "refunded";
 
   return (
@@ -888,20 +1007,20 @@ function WorkspaceResultStage({
         </div>
       ) : (
         <div className={`stage-empty ${isFailed ? "failed" : isActive ? "working" : ""}`}>
-          <div>
-            {isActive && <span className="status wait">{task.status}</span>}
-            {isFailed && <span className="status bad">{task.status}</span>}
+          <div className="stage-empty-card">
+            {isActive && task && <span className="status wait">{task.status}</span>}
+            {isFailed && <span className="status bad">{task?.status}</span>}
             <strong>
-              {isActive ? "正在生成结果" : isFailed ? "本次生成未完成" : pendingAssetIds.length > 0 ? "正在加载生成结果" : "结果将在这里生成"}
+              {isActive ? "正在生成结果" : isFailed ? "本次生成未完成" : pendingAssetIds.length > 0 ? "正在加载生成结果" : "暂无生成结果"}
             </strong>
             <span>
-              {isActive
+              {isActive && task
                 ? `${taskTypeLabel(task.taskType)}任务 ${task.id} 正在处理，完成后会在这里显示图片。`
                 : isFailed
-                  ? task.errorMessage || "请调整 Prompt 或参数后重试。"
+                  ? task?.errorMessage || "请调整提示词或参数后重试。"
                   : pendingAssetIds.length > 0
                     ? `任务已完成，正在同步资产 ${pendingAssetIds.join(", ")}。`
-                    : "完成左侧参数后提交任务，文生图和图生图结果都会显示在这里。"}
+                    : "提交生成任务后，结果会显示在这里。"}
             </span>
             {isActive && <div className="bar"><span /></div>}
           </div>
@@ -971,18 +1090,33 @@ function UploadField({ selectedAsset, onUploadAsset }: { selectedAsset?: ImageAs
   );
 }
 
-function AsideTasks({ onShortcutToImageMode, visibleTasks, serverError }: { onShortcutToImageMode: () => void; visibleTasks: ImageGenerationTask[]; serverError: string }) {
+function AsideTasks({ visibleTasks, serverError }: { visibleTasks: ImageGenerationTask[]; serverError: string }) {
+  const cards = visibleTasks.length > 0 ? visibleTasks.map(queueCardFromTask) : demoQueueCards;
+
   return (
-    <aside className="panel">
-      <div className="panel-head"><h2>任务与继续编辑</h2><span className="badge">状态映射</span></div>
-      <div className="panel-body recent">
-        {serverError && <div className="api-state bad">{serverError}</div>}
-        {visibleTasks.map(task => <div className="task" key={task.id}><strong>{task.status} · {task.id}</strong><span>{task.prompt}</span><p className="code">model={task.modelProvider}/{task.modelName} · chargedCredits={task.chargedCredits}</p>{(task.status === "running" || task.status === "storing") && <div className="bar"><span /></div>}</div>)}
-        <div className="task"><strong>failed · Prompt 合规拦截</strong><span>原因：包含受限品牌商标描述，请修改后重试。</span><button className="btn" type="button">修改 Prompt</button></div>
-        <div className="history"><span className="thumb" /><div><strong>图生图入口</strong><span className="small">可先从资产中心选择历史图片作为 sourceAssetId。</span></div></div>
-        <button className="btn" type="button" onClick={onShortcutToImageMode}>选择历史资产后继续图生图</button>
-      </div>
+    <aside className="workspace-aside">
+      <section className="panel queue-panel">
+        <div className="panel-head"><h2>生成队列</h2><span className="badge">live</span></div>
+        <div className="panel-body recent">
+          {serverError && <div className="api-state bad">{serverError}</div>}
+          {cards.map(card => <QueueTaskCard card={card} key={card.id} />)}
+        </div>
+      </section>
     </aside>
+  );
+}
+
+function QueueTaskCard({ card }: { card: QueueCard }) {
+  return (
+    <div className="task queue-task">
+      <div className="queue-title">
+        <strong>{card.title}</strong>
+        <span className={`status ${card.tone}`}>{card.status}</span>
+      </div>
+      <span className="queue-prompt">{card.prompt}</span>
+      <p className="code">{card.code}</p>
+      <p className="queue-note">{card.note}</p>
+    </div>
   );
 }
 
@@ -1072,12 +1206,18 @@ function AssetsPage({
     return () => {
       active = false;
     };
-  }, [query, sessionHydrated, sessionState, taskType, status, origin]);
+  }, [initialAssets, query, sessionHydrated, sessionState, taskType, status, origin]);
+
+  if (!sessionHydrated) {
+    return (
+      <section className="ai-workspace module-workspace assets-page" aria-label="图片资产中心" aria-busy="true">
+        <div className="asset-loading-surface" />
+      </section>
+    );
+  }
 
   if (!selected) {
-    const emptyMessage = !sessionHydrated
-      ? "正在校验登录状态..."
-      : sessionState !== "logged-in"
+    const emptyMessage = sessionState !== "logged-in"
         ? "登录后可查看你的资产、版本链和下载权限。"
         : filtersActive
           ? "没有匹配的资产。请调整搜索词、任务类型或状态筛选。"
@@ -1085,8 +1225,8 @@ function AssetsPage({
 
     return (
       <section className="ai-workspace module-workspace assets-page" aria-label="图片资产中心">
-        <section className="toolbar" aria-label="资产操作区">
-          <AssetUploadButton onUpload={onUploadAsset} />
+        <section className="toolbar asset-actions-toolbar" aria-label="资产操作区">
+          <AssetUploadButton className="btn primary asset-upload-button" onUpload={onUploadAsset} />
         </section>
         <div className="empty-card">{emptyMessage}</div>
         {loadError && <div className="api-state bad">{loadError}</div>}
@@ -1108,7 +1248,7 @@ function AssetsPage({
           {assetStatusOptions.map(option => <option key={option.value || "all"} value={option.value}>{option.label}</option>)}
         </select>
         <select className="select" aria-label="资产排序"><option>按最近生成排序</option><option>按下载时间排序</option></select>
-        <AssetUploadButton onUpload={onUploadAsset} />
+        <AssetUploadButton className="btn primary asset-upload-button" onUpload={onUploadAsset} />
       </section>
       <div className="api-state" role="status" aria-live="polite">
         {loading ? "正在从 API 加载资产列表..." : pagination ? `API 列表：第 ${pagination.page} 页，共 ${pagination.total} 张资产` : "本地资产列表"}
@@ -1117,11 +1257,11 @@ function AssetsPage({
       <section className="asset-layout">
         <div className="masonry">
           {visibleAssets.length === 0 && <div className="empty-card">没有匹配的资产。请调整搜索词、任务类型或状态筛选。</div>}
-          {visibleAssets.map(asset => <button className={`asset ${asset.id === selectedAssetId ? "active" : ""}`} key={asset.id} type="button" onClick={() => onSelectAsset(asset.id)}><div className="pic" style={{ backgroundImage: `linear-gradient(135deg, rgba(223, 60, 159, 0.3), rgba(239, 90, 102, 0.14)), url(${asset.imageUrl})` }} /><div className="meta"><div className="line"><strong>{asset.title}</strong><span className={`status ${asset.status === "succeeded" ? "ok" : asset.status === "processing" || asset.status === "reviewing" ? "wait" : "bad"}`}>{asset.status}</span></div><p className="small">{asset.id} · {assetOriginLabel(asset.origin)} · {assetTypeLabel(asset)} · {asset.createdAt}</p></div></button>)}
+          {visibleAssets.map(asset => <button className={`asset ${asset.id === selectedAssetId ? "active" : ""}`} key={asset.id} type="button" onClick={() => onSelectAsset(asset.id)}><AssetImage asset={asset} className="pic" /><div className="meta"><div className="line"><strong>{asset.title}</strong><span className={`status ${asset.status === "succeeded" ? "ok" : asset.status === "processing" || asset.status === "reviewing" ? "wait" : "bad"}`}>{asset.status}</span></div><p className="small">{asset.id} · {assetOriginLabel(asset.origin)} · {assetTypeLabel(asset)} · {asset.createdAt}</p></div></button>)}
         </div>
         <aside className="asset-side">
           <h2>{selected.title}</h2>
-          <div className="preview-img" style={{ backgroundImage: `linear-gradient(135deg, rgba(223, 60, 159, 0.32), rgba(239, 90, 102, 0.15)), url(${selected.imageUrl})` }} />
+          <AssetImage asset={selected} className="preview-img" />
           <p className="small">{selected.id} · {assetOriginLabel(selected.origin)} · {assetTypeLabel(selected)} · {selected.status} · {assetSourceText(selected)}</p>
           {selected.origin === "generated" && selected.commercialAuthorizationStatement && <p className="notice">{selected.commercialAuthorizationStatement}</p>}
           <div className="actions"><button className="btn primary" type="button" onClick={() => onDownload(selected.id)}>下载</button><Link className="btn" href="/workspace/image" onClick={onImageToImage}>继续图生图</Link><button className="btn" type="button" onClick={() => onDelete(selected.id)}>删除</button></div>
@@ -1152,7 +1292,7 @@ function AccountPage({
   const visibleOrders = orders.slice(0, 2);
 
   return (
-    <section aria-label="用户体系">
+    <section className="ai-workspace module-workspace account-page" aria-label="用户体系">
       <section className="auth-hero">
         <div className="auth-panel">
           <span className="eyebrow">Flux Art Account</span>
@@ -1170,7 +1310,7 @@ function AccountPage({
         <aside className="auth-panel"><h2>登录状态</h2><div className="stack"><div className={`status ${sessionState === "logged-in" ? "ok" : "wait"}`}>{sessionState === "logged-in" ? "server session 已验证" : "需要登录后继续"}</div><button className="btn primary full" type="button" onClick={onRefreshSession}>刷新 session</button><button className="btn full" type="button" onClick={onLogout}>退出当前 session</button></div></aside>
       </section>
       <section className="account-grid">
-        <article className="account-card stack"><div className="panel-head compact"><h2>积分</h2><span className="badge">生成前校验</span></div><div className="metric"><span>可用积分</span><strong>{credits}</strong><small>当前任务预估 18 积分</small></div><button className="btn full" type="button">购买积分</button></article>
+        <article className="account-card stack"><div className="panel-head compact"><h2>积分</h2><span className="badge">生成前校验</span></div><div className="metric"><span>可用积分</span><strong>{credits}</strong><small>当前任务预估 18 积分</small></div><Link className="btn full" href="/workspace/billing">购买积分</Link></article>
         <article className="account-card stack"><div className="panel-head compact"><h2>订单</h2><span className="badge">积分到账依据</span></div>{visibleOrders.length === 0 && <div className="invoice"><div><strong>暂无订单</strong><p className="small">购买积分后显示支付状态</p></div><span className="status wait">待购买</span></div>}{visibleOrders.map(order => <div className="invoice" key={order.orderId}><div><strong>{billingPlanLabel(order.planId)}</strong><p className="small">{order.outTradeNo || order.orderId}</p></div><span className={`status ${order.fulfillmentStatus === "fulfilled" ? "ok" : "wait"}`}>{orderStatusLabel(order)}</span></div>)}</article>
         <article className="account-card stack"><div className="panel-head compact"><h2>积分校验</h2><span className={`status ${sessionState === "logged-in" ? "ok" : "wait"}`}>{sessionState === "logged-in" ? "已登录" : "未登录"}</span></div>{["生成图片", "图生图", "下载原图"].map(item => <div className="account-row" key={item}><span>{item}</span><strong>{sessionState === "logged-in" ? "余额足够即可用" : "需登录"}</strong></div>)}</article>
       </section>
@@ -1196,7 +1336,7 @@ function BillingPage({
   const visibleOrders = orders.slice(0, 5);
 
   return (
-    <section aria-label="积分购买">
+    <section className="ai-workspace module-workspace billing-page" aria-label="积分购买">
       <section className="billing-hero">
         <div className="billing-panel">
           <h1>购买积分后解锁全部功能。</h1>
@@ -1205,13 +1345,6 @@ function BillingPage({
           <div className="notice">统一规则：余额足够即可使用全部功能；余额不足时只引导购买积分。</div>
         </div>
         <aside className="billing-panel"><h2>积分包</h2><div className="packs">{creditPackOptions.map(pack => <button className="pack" key={pack.planId} type="button" onClick={() => onCreateOrder(pack.planId)} aria-label={`购买 ${pack.label}`}><span>{pack.label}</span><strong>{pack.price}</strong></button>)}</div><button className="btn primary full" type="button" style={{ marginTop: 14 }} onClick={() => onCreateOrder("credits-1500")}>购买积分包</button></aside>
-      </section>
-      <section className="plans" aria-label="积分包">
-        {[
-          { title: "试用积分", price: "¥0", items: "注册后领取少量积分,可体验文生图和图生图,余额不足时引导购买", action: "查看余额" },
-          { title: "通用积分", price: "¥1 测试价", items: "解锁全部核心功能,失败未扣点自动退回,生成和下载统一扣积分", action: "购买积分", planId: "credits-1500" as const },
-          { title: "订单状态", price: "到账即用", items: "支付成功后积分到账,待支付订单不解锁功能,只保留积分购买记录", action: "查看订单" }
-        ].map(plan => <article className={`plan ${plan.planId ? "hot" : ""}`} key={plan.title}><h2>{plan.title}</h2><div className="price">{plan.price}</div><div className="list">{plan.items.split(",").map(item => <span className="item" key={item}><i className="dot" />{item}</span>)}</div><button className={`btn ${plan.planId ? "primary" : ""}`} type="button" disabled={!plan.planId} onClick={() => { if (plan.planId) onCreateOrder(plan.planId); }}>{plan.action}</button></article>)}
       </section>
       <section className="account-card stack" aria-label="最近订单">
         <h2>最近订单</h2>

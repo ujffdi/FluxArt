@@ -42,7 +42,7 @@ export function createEpayPaymentUrl(input: { outTradeNo: string; amountCents: n
     name: input.planName,
     money: formatEpayAmount(input.amountCents),
     notify_url: process.env.MAPAY_NOTIFY_URL || process.env.EPAY_NOTIFY_URL || "http://127.0.0.1:3107/api/payments/mapay/notify",
-    return_url: process.env.MAPAY_RETURN_URL || process.env.EPAY_RETURN_URL || "http://127.0.0.1:3107/workspace/billing"
+    return_url: process.env.MAPAY_RETURN_URL || process.env.EPAY_RETURN_URL || "http://127.0.0.1:3107/api/payments/mapay/return"
   };
   const sign = signEpayParams(params);
   const query = new URLSearchParams({ ...params, sign, sign_type: "MD5" }).toString();

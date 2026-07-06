@@ -6,14 +6,12 @@ import type { GenerationMode, StructureMode } from "@/types/image";
 
 export type ProductPage = "workspace" | "assets" | "account" | "billing";
 export type SessionState = "logged-in" | "guest" | "expired";
-export type ThemeName = "dark" | "light";
 
 interface ImageWorkspaceState {
   page: ProductPage;
   generationMode: "txt" | "img";
   selectedAssetId: string;
   sessionState: SessionState;
-  theme: ThemeName;
   toast: string;
   customSizeVisible: boolean;
   generationCount: number;
@@ -23,7 +21,6 @@ interface ImageWorkspaceState {
   setGenerationMode: (mode: "txt" | "img") => void;
   setSelectedAssetId: (assetId: string) => void;
   setSessionState: (state: SessionState) => void;
-  setTheme: (theme: ThemeName) => void;
   showToast: (toast: string) => void;
   clearToast: () => void;
   setCustomSizeVisible: (visible: boolean) => void;
@@ -43,7 +40,6 @@ export const useImageWorkspaceStore = create<ImageWorkspaceState>()(
       generationMode: "txt",
       selectedAssetId: "IMG-1832",
       sessionState: "guest",
-      theme: "dark",
       toast: "",
       customSizeVisible: false,
       generationCount: 4,
@@ -53,7 +49,6 @@ export const useImageWorkspaceStore = create<ImageWorkspaceState>()(
       setGenerationMode: generationMode => set({ generationMode }),
       setSelectedAssetId: selectedAssetId => set({ selectedAssetId }),
       setSessionState: sessionState => set({ sessionState }),
-      setTheme: theme => set({ theme }),
       showToast: toast => set({ toast }),
       clearToast: () => set({ toast: "" }),
       setCustomSizeVisible: customSizeVisible => set({ customSizeVisible }),
@@ -66,7 +61,6 @@ export const useImageWorkspaceStore = create<ImageWorkspaceState>()(
       partialize: state => ({
         generationMode: state.generationMode,
         selectedAssetId: state.selectedAssetId,
-        theme: state.theme,
         customSizeVisible: state.customSizeVisible,
         generationCount: state.generationCount,
         referenceStrength: state.referenceStrength,

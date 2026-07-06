@@ -14,12 +14,12 @@ const mockPaymentEnv = {
   MAPAY_MERCHANT_ID: "mock-merchant",
   MAPAY_SIGNING_SECRET: "mock-epay-secret",
   MAPAY_NOTIFY_URL: `http://127.0.0.1:${port}/api/payments/mapay/notify`,
-  MAPAY_RETURN_URL: `http://127.0.0.1:${port}/workspace/billing`,
+  MAPAY_RETURN_URL: `http://127.0.0.1:${port}/api/payments/mapay/return`,
   EPAY_API_URL: "",
   EPAY_MERCHANT_ID: "mock-merchant",
   EPAY_SIGNING_SECRET: "mock-epay-secret",
   EPAY_NOTIFY_URL: `http://127.0.0.1:${port}/api/payments/epay/notify`,
-  EPAY_RETURN_URL: `http://127.0.0.1:${port}/workspace/billing`
+  EPAY_RETURN_URL: `http://127.0.0.1:${port}/api/payments/epay/return`
 };
 
 let serverProcess;
@@ -50,6 +50,12 @@ async function request(path, options = {}) {
     if (cookieValue) cookieJar.set(name, cookieValue);
     else cookieJar.delete(name);
   }
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.startsWith("image/")) {
+    const body = Buffer.from(await response.arrayBuffer());
+    return { response, body, setCookies };
+  }
+
   const text = await response.text();
   let body;
 
@@ -76,6 +82,15 @@ function expectApiCode(result, expectedCode, label) {
 
 function expect(condition, label) {
   if (!condition) fail(label);
+}
+
+async function expectAssetDownload(assetId, label) {
+  const result = await request(`/api/image/assets/${assetId}/download`);
+  expectStatus(result, 200, label);
+  expect(result.response.headers.get("content-disposition")?.includes("attachment"), `${label} should return an attachment response`);
+  expect(result.response.headers.get("content-type")?.startsWith("image/"), `${label} should return an image MIME type`);
+  expect(Buffer.isBuffer(result.body) && result.body.byteLength > 0, `${label} should return image bytes`);
+  return result;
 }
 
 function daysBetween(fromMs, toIso) {
@@ -455,7 +470,7 @@ async function runSmoke() {
     out_trade_no: creditPackOrder.body.data.order.outTradeNo,
     trade_no: `provider_${Date.now().toString(36)}`,
     trade_status: "TRADE_SUCCESS",
-    money: "1.00"
+    money: "1"
   };
   const invalidSignatureNotify = await request("/api/payments/epay/notify", {
     method: "POST",
@@ -580,10 +595,18 @@ async function runSmoke() {
   expectStatus(nonProDownload, 200, "non-Pro HD download");
   expect(nonProDownload.body.data.decision.quality === "hd" && nonProDownload.body.data.decision.watermark === false, "non-Pro downloads should provide HD no-watermark output");
   expect(nonProDownload.body.data.decision.costCredits === 5, "non-Pro HD no-watermark downloads should cost 5 credits");
+  expect(nonProDownload.body.data.decision.downloadUrl === `/api/image/assets/${generatedAssetId}/download`, "non-Pro download should return the owned attachment endpoint");
+  await expectAssetDownload(generatedAssetId, "non-Pro HD download file");
   const creditsAfterNonProDownload = await request("/api/account/credits");
   expectStatus(creditsAfterNonProDownload, 200, "credits after non-Pro download");
   expect(creditsAfterNonProDownload.body.data.credits.credits === 545, "non-Pro HD no-watermark download should spend 5 credits");
   expect(creditsAfterNonProDownload.body.data.credits.recentChanges.some(entry => entry.label === "Download Credit Spend" && entry.amount === -5), "download spend should write a ledger entry");
+  const repeatedNonProDownload = await request(`/api/image/assets/${generatedAssetId}/download`, { method: "POST" });
+  expectStatus(repeatedNonProDownload, 200, "repeat non-Pro HD download");
+  expect(repeatedNonProDownload.body.data.decision.costCredits === 0, "already unlocked non-Pro downloads should not spend credits again");
+  const creditsAfterRepeatedNonProDownload = await request("/api/account/credits");
+  expectStatus(creditsAfterRepeatedNonProDownload, 200, "credits after repeat non-Pro download");
+  expect(creditsAfterRepeatedNonProDownload.body.data.credits.credits === 545, "repeat non-Pro HD download should not spend credits again");
 
   const proOrder = await request("/api/orders/membership", {
     method: "POST",
@@ -642,12 +665,36 @@ async function runSmoke() {
   const proDownload = await request(`/api/image/assets/${proGeneratedAssetId}/download`, { method: "POST" });
   expectStatus(proDownload, 200, "Pro HD download");
   expect(proDownload.body.data.decision.costCredits === 0 && proDownload.body.data.decision.fairUseApplied === true, "Pro downloads within fair-use cap should cost 0 credits");
+  expect(proDownload.body.data.decision.downloadUrl === `/api/image/assets/${proGeneratedAssetId}/download`, "Pro download should return the owned attachment endpoint");
+  await expectAssetDownload(proGeneratedAssetId, "Pro HD download file");
   const membershipAfterProDownload = await request("/api/account/membership");
   expectStatus(membershipAfterProDownload, 200, "membership after Pro download");
   expect(membershipAfterProDownload.body.data.membership.includedHdDownloadsRemaining === 299, "Pro HD download should consume one included download");
   const creditsAfterProDownload = await request("/api/account/credits");
   expectStatus(creditsAfterProDownload, 200, "credits after Pro download");
   expect(creditsAfterProDownload.body.data.credits.credits === 1535, "Pro fair-use download should not spend credits beyond the Pro task cost");
+
+  const returnOrder = await request("/api/orders/credits", {
+    method: "POST",
+    body: JSON.stringify({ planId: "credits-500" })
+  });
+  expectStatus(returnOrder, 200, "create return-route credit pack order");
+  const returnParams = {
+    pid: "mock-merchant",
+    out_trade_no: returnOrder.body.data.order.outTradeNo,
+    trade_no: `return_${Date.now().toString(36)}`,
+    trade_status: "TRADE_SUCCESS",
+    money: "1.00"
+  };
+  const signedReturnParams = { ...returnParams, sign: signEpayParams(returnParams), sign_type: "MD5" };
+  const returnResult = await request(`/api/payments/mapay/return?${new URLSearchParams(signedReturnParams)}`, {
+    redirect: "manual"
+  });
+  expect(returnResult.response.status === 307 || returnResult.response.status === 308, "signed payment return should redirect to billing");
+  expect(returnResult.response.headers.get("location")?.includes("/workspace/billing?payment=success"), "signed payment return should redirect with success state");
+  const creditsAfterReturn = await request("/api/account/credits");
+  expectStatus(creditsAfterReturn, 200, "credits after payment return");
+  expect(creditsAfterReturn.body.data.credits.credits === 2035, "signed payment return should fulfill the credit pack once");
 
   const uploadedSourceTask = await request("/api/image/tasks", {
     method: "POST",

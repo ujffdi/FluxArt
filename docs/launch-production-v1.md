@@ -25,6 +25,15 @@ Copy `.env.example` to `.env.local` or configure equivalent deployment secrets. 
 - `IMAGE_MODEL_EXECUTION=live`, `IMAGE_MODEL_PROVIDER`, `IMAGE_MODEL_NAME`, `IMAGE_MODEL_BASE_URL`, `IMAGE_MODEL_API_KEY_SECRET_REF`, and the referenced key
 - `EPAY_API_URL`, `EPAY_MERCHANT_ID`, `EPAY_SIGNING_SECRET`, `EPAY_NOTIFY_URL`, `EPAY_RETURN_URL`
 
+For MaPay-compatible deployments, point the browser return URL at the server route:
+
+```bash
+MAPAY_NOTIFY_URL=https://your-domain.example.com/api/payments/mapay/notify
+MAPAY_RETURN_URL=https://your-domain.example.com/api/payments/mapay/return
+```
+
+The notify callback remains the primary source of truth. The return route accepts only gateway-signed payment parameters, runs the same idempotent fulfillment path, and then redirects back to `/workspace/billing`.
+
 Run:
 
 ```bash

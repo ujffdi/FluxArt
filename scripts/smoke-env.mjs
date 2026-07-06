@@ -31,7 +31,7 @@ const productionEnv = {
   MAPAY_MERCHANT_ID: "merchant-123",
   MAPAY_SIGNING_SECRET: "mapay-signing-secret-123",
   MAPAY_NOTIFY_URL: "https://app.example.com/api/payments/mapay/notify",
-  MAPAY_RETURN_URL: "https://app.example.com/workspace/billing"
+  MAPAY_RETURN_URL: "https://app.example.com/api/payments/mapay/return"
 };
 
 const production = runCheck(productionEnv);
