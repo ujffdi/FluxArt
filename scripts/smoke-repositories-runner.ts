@@ -230,6 +230,13 @@ async function run() {
       }
     }
   }
+  function assertMysqlDateTimeValue(value: unknown, columnName: string) {
+    if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}T/.test(value)) {
+      const error = new Error(`Incorrect datetime value: '${value}' for column '${columnName}' at row 1`);
+      (error as Error & { code?: string }).code = "1292";
+      throw error;
+    }
+  }
   const rawModelConfigClient = {
     ...delegates,
     activeImageModelConfiguration: undefined,
@@ -265,6 +272,9 @@ async function run() {
 
       if (query.includes("INSERT INTO active_image_model_configurations")) {
         if (!rawActiveModelTableExists) throwMissingRawTable("active_image_model_configurations");
+        assertMysqlDateTimeValue(values[11], "last_tested_at");
+        assertMysqlDateTimeValue(values[14], "created_at");
+        assertMysqlDateTimeValue(values[15], "updated_at");
         const row: DbRecord = {
           id: String(values[0]),
           displayName: String(values[1]),
@@ -308,6 +318,8 @@ async function run() {
         }
         const row = rawActiveModelRows.find(item => item.id === String(values[5]));
         if (!row) return 0;
+        assertMysqlDateTimeValue(values[1], "last_tested_at");
+        assertMysqlDateTimeValue(values[4], "updated_at");
         row.lastTestStatus = String(values[0]);
         row.lastTestedAt = values[1] as RecordValue;
         row.lastTestError = values[2] as RecordValue;

@@ -76,6 +76,16 @@ function toIso(value: RecordValue | undefined) {
   return new Date().toISOString();
 }
 
+function toMysqlDateTime(value: RecordValue | undefined) {
+  if (value === null) return null;
+  const date = value instanceof Date || typeof value === "string" || typeof value === "number"
+    ? new Date(value)
+    : new Date();
+  if (!Number.isFinite(date.getTime())) return value;
+  const pad = (part: number, length = 2) => String(part).padStart(length, "0");
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}.${pad(date.getUTCMilliseconds(), 3)}`;
+}
+
 function asString(value: RecordValue | undefined, fallback = "") {
   return typeof value === "string" ? value : fallback;
 }
@@ -564,11 +574,11 @@ async function saveSelectableModelConfigurationRecords(client: PrismaClientLike,
     enabled,
     isDefault,
     data.lastTestStatus,
-    data.lastTestedAt,
+    data.lastTestedAt ? toMysqlDateTime(data.lastTestedAt) : null,
     data.lastTestError,
     data.updatedByUserId,
-    createdAt || data.updatedAt,
-    data.updatedAt
+    toMysqlDateTime(createdAt || data.updatedAt),
+    toMysqlDateTime(data.updatedAt)
   );
   }
 
@@ -610,10 +620,10 @@ async function updateActiveModelConfigurationTestResultRecord(
          updated_at = ?
      WHERE id = ?`,
     input.testStatus,
-    input.testedAt,
+    toMysqlDateTime(input.testedAt),
     input.testError || null,
     input.updatedByUserId || null,
-    input.testedAt,
+    toMysqlDateTime(input.testedAt),
     modelId
   );
   const [record] = await rawClient.$queryRawUnsafe(`${activeModelConfigurationSelect} WHERE id = ? LIMIT 1`, modelId);
