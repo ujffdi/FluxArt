@@ -369,6 +369,11 @@ async function run() {
       return { status: response.status, text: await response.text() };
     }, signedNotifyParams);
     if (notifyPayload.status !== 200 || notifyPayload.text !== "success") fail(`browser credit pack notify should succeed, received HTTP ${notifyPayload.status} ${notifyPayload.text}`);
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.waitForFunction(() => {
+      const select = document.querySelector('select[aria-label="模型"]');
+      return select && !select.disabled;
+    }, undefined, { timeout: 10000 });
     await page.goto(`${baseUrl}/workspace/image`, { waitUntil: "networkidle" });
     const paidModelSelect = page.getByLabel("模型");
     await paidModelSelect.waitFor({ timeout: 10000 });

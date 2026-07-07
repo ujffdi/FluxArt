@@ -148,6 +148,7 @@ async function run() {
   const { createTask, deleteAsset, listAssets, runImageTask, transitionTaskState } = await import("../src/server/image/business/image-service");
   const { storeGeneratedAsset } = await import("../src/server/image/storage/upload-service");
   const { submitImageGeneration } = await import("../src/server/image/ai/image-model-adapter");
+  const { testModelConfiguration } = await import("../src/server/image/admin/model-config-service");
   const { TaskCapabilityError, TaskConcurrencyError } = await import("../src/server/image/business/task-policy");
   const { creditValidUntilIso } = await import("../src/server/credits/credit-validity");
 
@@ -155,6 +156,21 @@ async function run() {
     creditValidUntilIso(new Date("2026-01-31T12:34:56.000Z")) === "2026-02-28T12:34:56.000Z",
     "credit validity should add one calendar month and clamp end-of-month dates"
   );
+  try {
+    await testModelConfiguration({
+      provider: "agnes",
+      model: "agnes-image-2.1-flash",
+      baseUrl: "https://apihub.agnes-ai.com/v1",
+      apiKeySecretRef: "sk-test-secret-value-that-should-not-be-returned",
+      executionMode: "live",
+      requestTimeoutMs: 1000
+    }, "usr-smoke");
+    throw new Error("expected pasted API key secret ref to be rejected");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    expect(message.includes("environment variable"), "live model test failures should explain that apiKeySecretRef expects an environment variable name");
+    expect(!message.includes("sk-test-secret-value"), "live model test failures should not echo pasted API key values");
+  }
   const userId = "usr-smoke";
   const now = new Date("2026-06-24T00:00:00.000Z");
   const delegates = {

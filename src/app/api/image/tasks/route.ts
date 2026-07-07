@@ -3,6 +3,7 @@ import { getRequestSession, renewSessionCookie } from "@/server/auth/request-aut
 import { CreditBalanceError } from "@/server/credits/credit-service";
 import { TaskCapabilityError, TaskConcurrencyError } from "@/server/image/business/task-policy";
 import { parseTaskListQuery } from "@/server/image/business/list-query";
+import { redactSecretValues } from "@/server/image/ai/secret-ref";
 import { fail, ok } from "@/server/shared/api-response";
 import type { CreateImageTaskInput, GenerationMode, StructureMode } from "@/types/image";
 
@@ -90,7 +91,7 @@ export async function POST(request: Request) {
     if (error instanceof TaskCapabilityError || error instanceof TaskConcurrencyError) {
       return fail(error.message, error.status, error.code);
     }
-    const message = error instanceof Error ? error.message : "model request failed";
+    const message = redactSecretValues(error instanceof Error ? error.message : "model request failed");
     if (message.startsWith("Missing ")) {
       return fail(message, 500, "MODEL_AUTH_MISSING");
     }

@@ -1,5 +1,6 @@
 import { getRepositories } from "@/server/data/repositories";
 import { getEnvImageModelConfig } from "@/server/image/ai/model-config";
+import { liveSecretRefProblem, looksLikeSecretValue, redactSecretValues } from "@/server/image/ai/secret-ref";
 import type { ActiveImageModelConfigurationRecord } from "@/server/data/records";
 import type { EditableImageModelConfiguration, EditableSelectableImageModel, ModelConfigurationTestStatus } from "@/types/model-config";
 
@@ -78,7 +79,8 @@ function validUrl(value: string) {
 }
 
 function errorSummary(error: unknown) {
-  return error instanceof Error ? error.message.slice(0, 512) : String(error).slice(0, 512);
+  const message = error instanceof Error ? error.message : String(error);
+  return redactSecretValues(message).slice(0, 512);
 }
 
 export function validateModelConfiguration(input: unknown): EditableImageModelConfiguration {
@@ -102,8 +104,18 @@ export function validateModelConfiguration(input: unknown): EditableImageModelCo
   if (!apiKeySecretRef || apiKeySecretRef.length > secretRefMaxLength) {
     throw new ModelConfigurationError(`apiKeySecretRef must be 1-${secretRefMaxLength} characters`, "MODEL_SECRET_REF_INVALID");
   }
+  if (looksLikeSecretValue(apiKeySecretRef)) {
+    throw new ModelConfigurationError(
+      "apiKeySecretRef must be an environment variable name that contains the API key, not the API key value",
+      "MODEL_SECRET_REF_VALUE"
+    );
+  }
   if (!executionMode) {
     throw new ModelConfigurationError("executionMode must be mock or live", "MODEL_EXECUTION_INVALID");
+  }
+  const secretRefProblem = executionMode === "live" ? liveSecretRefProblem(apiKeySecretRef) : undefined;
+  if (secretRefProblem) {
+    throw new ModelConfigurationError(secretRefProblem, "MODEL_SECRET_REF_INVALID");
   }
   if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1000 || requestTimeoutMs > 1800000) {
     throw new ModelConfigurationError("requestTimeoutMs must be an integer from 1000 to 1800000", "MODEL_TIMEOUT_INVALID");
@@ -256,6 +268,10 @@ export interface ModelConfigurationTestResult {
 }
 
 async function testLiveModelConfiguration(config: EditableImageModelConfiguration) {
+  const secretRefProblem = liveSecretRefProblem(config.apiKeySecretRef);
+  if (secretRefProblem) {
+    throw new ModelConfigurationError(secretRefProblem, "MODEL_SECRET_REF_INVALID");
+  }
   const apiKey = process.env[config.apiKeySecretRef];
   if (!apiKey) {
     throw new ModelConfigurationError(`Missing ${config.apiKeySecretRef} for live ${config.provider} image generation`, "MODEL_AUTH_MISSING", 500);

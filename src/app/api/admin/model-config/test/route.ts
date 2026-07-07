@@ -1,5 +1,6 @@
 import { requireAdminRequest } from "@/server/admin/admin-auth";
 import { renewSessionCookie } from "@/server/auth/request-auth";
+import { redactSecretValues } from "@/server/image/ai/secret-ref";
 import { ModelConfigurationError, testModelConfiguration } from "@/server/image/admin/model-config-service";
 import { fail, ok } from "@/server/shared/api-response";
 
@@ -22,8 +23,8 @@ export async function POST(request: Request) {
     return renewSessionCookie(response, admin.session.sessionToken, admin.session.session);
   } catch (error) {
     if (error instanceof ModelConfigurationError) {
-      return fail(error.message, error.status, error.code);
+      return fail(redactSecretValues(error.message), error.status, error.code);
     }
-    return fail(error instanceof Error ? error.message : "model configuration test failed", 500, "MODEL_CONFIG_TEST_FAILED");
+    return fail(redactSecretValues(error instanceof Error ? error.message : "model configuration test failed"), 500, "MODEL_CONFIG_TEST_FAILED");
   }
 }

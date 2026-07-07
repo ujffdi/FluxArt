@@ -413,6 +413,37 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
   }, [clearSessionOwnedState, loadSessionOwnedState]);
 
   useEffect(() => {
+    if (!authAccount || !sessionHydrated) return;
+    const account = authAccount;
+    let refreshInFlight = false;
+
+    async function refreshVisibleSessionState() {
+      if (document.visibilityState === "hidden" || refreshInFlight) return;
+      refreshInFlight = true;
+      try {
+        await loadSessionOwnedState(account);
+      } catch (error) {
+        if (error instanceof ApiClientError && error.status === 401) {
+          clearSessionOwnedState();
+          useImageWorkspaceStore.getState().setSessionState("guest");
+        } else {
+          setServerError(workspaceErrorMessage(error, "账户状态刷新失败，请稍后重试。"));
+        }
+      } finally {
+        refreshInFlight = false;
+      }
+    }
+
+    window.addEventListener("focus", refreshVisibleSessionState);
+    document.addEventListener("visibilitychange", refreshVisibleSessionState);
+
+    return () => {
+      window.removeEventListener("focus", refreshVisibleSessionState);
+      document.removeEventListener("visibilitychange", refreshVisibleSessionState);
+    };
+  }, [authAccount, clearSessionOwnedState, loadSessionOwnedState, sessionHydrated]);
+
+  useEffect(() => {
     if (!hasServerSession || !authAccount || !activeTaskIds) return;
 
     let cancelled = false;
