@@ -460,9 +460,13 @@ async function run() {
     await page.getByRole("button", { name: "立即登录" }).click();
     await page.getByText("已登录 · Browser Smoke").first().waitFor({ state: "attached", timeout: 10000 });
     await page.goto(`${baseUrl}/workspace/account`);
-    await page.getByText("server session 已验证").waitFor({ timeout: 10000 });
-    await page.getByText(`${username} · 积分充足`).waitFor({ timeout: 10000 });
-    await page.getByText("积分校验").waitFor({ timeout: 10000 });
+    await page.waitForURL("**/workspace/billing", { timeout: 10000 });
+    await page.getByRole("heading", { name: "Browser Smoke" }).waitFor({ timeout: 10000 });
+    await page.getByText(username).waitFor({ timeout: 10000 });
+    await page.getByRole("heading", { name: "积分包" }).waitFor({ timeout: 10000 });
+    await page.getByRole("heading", { name: "最近订单" }).waitFor({ timeout: 10000 });
+    const oldAccountValidationCount = await page.getByText("积分校验").count();
+    if (oldAccountValidationCount > 0) fail("merged account and credits page should not render the old credit validation panel");
 
     const uploadedAssetPayload = await page.evaluate(async base64 => {
       const bytes = Uint8Array.from(atob(base64), char => char.charCodeAt(0));

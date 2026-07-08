@@ -316,6 +316,16 @@ h1 { margin: 18px 0 12px; font: 650 46px/1.06 var(--font-display); letter-spacin
 .profile-line, .auth-state { display: grid; grid-template-columns: 72px 1fr; gap: 14px; align-items: center; }
 .avatar { width: 72px; height: 72px; border-radius: 24px; display: grid; place-items: center; background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; font-size: 22px; font-weight: 760; box-shadow: 0 18px 42px rgba(124, 92, 255, 0.28); }
 .account-grid, .auth-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.account-credits-page { display: grid; gap: 16px; }
+.account-credits-top { display: grid; grid-template-columns: minmax(240px, 1fr) minmax(180px, 240px) auto; gap: 16px; align-items: center; }
+.account-credits-user { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.account-credits-user h1 { margin: 0; font-size: 28px; line-height: 1.18; overflow-wrap: anywhere; }
+.account-credits-balance { display: grid; gap: 2px; min-height: 72px; align-content: center; }
+.account-credits-balance span,
+.account-credits-balance small { color: var(--muted); font-size: 12px; }
+.account-credits-balance strong { display: block; font-size: 32px; line-height: 1; }
+.account-credits-section { display: grid; gap: 12px; }
+.account-credit-packs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .stack { display: grid; gap: 12px; }
 .account-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
 .meter { height: 10px; border-radius: 999px; background: rgba(255, 255, 255, 0.09); overflow: hidden; }
@@ -840,6 +850,7 @@ body:has(.ai-workspace) .avatar-btn {
 .module-workspace .asset-side,
 .module-workspace .auth-panel,
 .module-workspace .account-card,
+.module-workspace .account-credits-top,
 .module-workspace .billing-panel,
 .module-workspace .plan {
   border: 1px solid rgba(218, 194, 255, 0.88);
@@ -964,6 +975,7 @@ body:has(.ai-workspace) .avatar-btn {
 .module-workspace .auth-panel,
 .module-workspace .billing-panel,
 .module-workspace .account-card,
+.module-workspace .account-credits-top,
 .module-workspace .plan {
   padding: 22px;
 }
@@ -982,12 +994,15 @@ body:has(.ai-workspace) .avatar-btn {
 .module-workspace h2,
 .module-workspace .line strong,
 .module-workspace .metric strong,
+.module-workspace .account-credits-balance strong,
 .module-workspace .price {
   color: #15182b;
 }
 
 .module-workspace .lead,
 .module-workspace .small,
+.module-workspace .account-credits-balance span,
+.module-workspace .account-credits-balance small,
 .module-workspace .list {
   color: var(--ai-soft);
 }
@@ -1222,7 +1237,7 @@ body:has(.ai-workspace) .avatar-btn {
 }
 
 @media (max-width: 1120px) {
-  .workspace-grid, .asset-layout, .account-hero, .account-grid, .auth-hero, .auth-grid, .guard-grid, .billing-hero { grid-template-columns: 1fr; }
+  .workspace-grid, .asset-layout, .account-hero, .account-grid, .auth-hero, .auth-grid, .guard-grid, .billing-hero, .account-credits-top { grid-template-columns: 1fr; }
   .masonry, .plans { grid-template-columns: 1fr 1fr; }
   .toolbar { grid-template-columns: 1fr 1fr; }
   .nav { overflow-x: auto; max-width: 48vw; }
@@ -1238,7 +1253,7 @@ body:has(.ai-workspace) .avatar-btn {
   .top { position: static; height: auto; align-items: flex-start; flex-direction: column; padding: 14px; }
   .nav { max-width: 100%; width: 100%; }
   .wallet { flex-wrap: wrap; }
-  .compare, .masonry, .plans, .toolbar, .balance, .guard-grid { grid-template-columns: 1fr; }
+  .compare, .masonry, .plans, .toolbar, .balance, .guard-grid, .account-credit-packs { grid-template-columns: 1fr; }
   .billing-panel h1, h1 { font-size: 36px; }
   .row { grid-template-columns: 1fr; }
   body:has(.ai-workspace) .app { padding: 12px; }

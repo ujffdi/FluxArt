@@ -4,7 +4,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { GenerationMode, StructureMode } from "@/types/image";
 
-export type ProductPage = "workspace" | "assets" | "account" | "billing";
+export type ProductPage = "workspace" | "assets" | "billing";
 export type SessionState = "logged-in" | "guest" | "expired";
 
 interface ImageWorkspaceState {

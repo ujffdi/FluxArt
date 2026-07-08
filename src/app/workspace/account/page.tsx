@@ -1,5 +1,5 @@
-import { FluxArtShell } from "@/features/flux-art/flux-art-shell";
+import { redirect } from "next/navigation";
 
 export default function WorkspaceAccountPage() {
-  return <FluxArtShell activePage="account" />;
+  redirect("/workspace/billing");
 }

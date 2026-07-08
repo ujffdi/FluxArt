@@ -244,6 +244,10 @@ _Avoid_: Pay-as-you-go user, paid user
 A paid package that grants a fixed amount of one-month Purchased Credits. V1 offers 500, 1500, and 5000 credit packs.
 _Avoid_: Recharge package, top-up plan
 
+**Account and Credits Surface**:
+The product area where a user checks account state, current credit balance, Credit Pack purchase options, and recent order status.
+_Avoid_: User system, recharge center, separate billing page
+
 **Watermarked Download**:
 A standard-resolution download that includes a product watermark. This is the default download right for Free Users.
 _Avoid_: Free download

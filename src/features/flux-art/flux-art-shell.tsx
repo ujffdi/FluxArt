@@ -44,8 +44,7 @@ type NavItem = { id: string; page?: ProductPage; href: string; label: string };
 const navItems: NavItem[] = [
   { id: "workspace", page: "workspace", href: "/workspace/image", label: "生图工作台" },
   { id: "assets", page: "assets", href: "/workspace/image/assets", label: "资产中心" },
-  { id: "account", page: "account", href: "/workspace/account", label: "用户体系" },
-  { id: "billing", page: "billing", href: "/workspace/billing", label: "积分购买" }
+  { id: "billing", page: "billing", href: "/workspace/billing", label: "账户与积分" }
 ];
 
 const modelAdminNavItem: NavItem = {
@@ -680,18 +679,6 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
     });
   }
 
-  async function refreshSessionState() {
-    try {
-      const auth = await getCurrentAuthSession();
-      await loadSessionOwnedState(auth.account);
-      store.showToast("登录状态已刷新");
-    } catch (error) {
-      clearSessionOwnedState();
-      store.setSessionState("guest");
-      store.showToast(`登录状态无效：${errorMessage(error, "请重新登录")}`);
-    }
-  }
-
   async function submitAuthCredentials(input: { mode: "login" | "register"; username: string; password: string; displayName?: string }) {
     try {
       const auth = input.mode === "register"
@@ -791,8 +778,17 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
         />
       )}
 
-      {activePage === "account" && <AccountPage account={authAccount} credits={credits} orders={billingOrders} sessionState={sessionState} onRefreshSession={refreshSessionState} onLogout={logoutSession} />}
-      {activePage === "billing" && <BillingPage credits={credits} orders={billingOrders} onCreateOrder={createOrder} />}
+      {activePage === "billing" && (
+        <BillingPage
+          account={authAccount}
+          credits={credits}
+          orders={billingOrders}
+          sessionState={sessionState}
+          onCreateOrder={createOrder}
+          onLogin={() => setAuthModal("查看余额并购买积分")}
+          onLogout={() => setShowLogout(true)}
+        />
+      )}
 
       <DownloadModal decision={downloadDecision} onClose={() => setDownloadDecision(null)} />
       <AuthModal
@@ -1381,52 +1377,6 @@ function AssetsPage({
   );
 }
 
-function AccountPage({
-  account,
-  credits,
-  orders,
-  sessionState,
-  onRefreshSession,
-  onLogout
-}: {
-  account: AuthAccount | null;
-  credits: number;
-  orders: BillingOrder[];
-  sessionState: "logged-in" | "guest" | "expired";
-  onRefreshSession: () => void;
-  onLogout: () => void;
-}) {
-  const displayName = account?.displayName || "未登录用户";
-  const avatar = displayName.slice(0, 1).toUpperCase();
-  const visibleOrders = orders.slice(0, 2);
-
-  return (
-    <section className="ai-workspace module-workspace account-page" aria-label="用户体系">
-      <section className="auth-hero">
-        <div className="auth-panel">
-          <span className="eyebrow">Flux Art Account</span>
-          <h1>账户只回答三件事：登录、积分、订单。</h1>
-          <p className="lead">所有功能只看积分余额；支付积分后即可生成、图生图、保存和下载。</p>
-          <div className="auth-state">
-            <div className="avatar">{avatar}</div>
-            <div>
-              <div className="line"><h2 style={{ margin: 0 }}>{displayName} · {sessionState === "logged-in" ? "已登录" : "未登录"}</h2><span className={`status ${sessionState === "logged-in" ? "ok" : "wait"}`}>{sessionState === "logged-in" ? "登录有效" : "未登录"}</span></div>
-              <p className="small">{account?.username ? `${account.username} · 积分充足，全部功能可用` : "游客可浏览能力和填写参数；生成、保存、下载和购买积分前需要登录。"}</p>
-            </div>
-          </div>
-          <div className="auth-actions"><button className="btn primary" type="button" onClick={onRefreshSession}>刷新 session</button><button className="btn" type="button" onClick={onLogout}>退出</button></div>
-        </div>
-        <aside className="auth-panel"><h2>登录状态</h2><div className="stack"><div className={`status ${sessionState === "logged-in" ? "ok" : "wait"}`}>{sessionState === "logged-in" ? "server session 已验证" : "需要登录后继续"}</div><button className="btn primary full" type="button" onClick={onRefreshSession}>刷新 session</button><button className="btn full" type="button" onClick={onLogout}>退出当前 session</button></div></aside>
-      </section>
-      <section className="account-grid">
-        <article className="account-card stack"><div className="panel-head compact"><h2>积分</h2><span className="badge">生成前校验</span></div><div className="metric"><span>可用积分</span><strong>{credits}</strong><small>当前任务预估 18 积分</small></div><Link className="btn full" href="/workspace/billing">购买积分</Link></article>
-        <article className="account-card stack"><div className="panel-head compact"><h2>订单</h2><span className="badge">积分到账依据</span></div>{visibleOrders.length === 0 && <div className="invoice"><div><strong>暂无订单</strong><p className="small">购买积分后显示支付状态</p></div><span className="status wait">待购买</span></div>}{visibleOrders.map(order => <div className="invoice" key={order.orderId}><div><strong>{billingPlanLabel(order.planId)}</strong><p className="small">{order.outTradeNo || order.orderId}</p></div><span className={`status ${order.fulfillmentStatus === "fulfilled" ? "ok" : "wait"}`}>{orderStatusLabel(order)}</span></div>)}</article>
-        <article className="account-card stack"><div className="panel-head compact"><h2>积分校验</h2><span className={`status ${sessionState === "logged-in" ? "ok" : "wait"}`}>{sessionState === "logged-in" ? "已登录" : "未登录"}</span></div>{["生成图片", "图生图", "下载原图"].map(item => <div className="account-row" key={item}><span>{item}</span><strong>{sessionState === "logged-in" ? "余额足够即可用" : "需登录"}</strong></div>)}</article>
-      </section>
-    </section>
-  );
-}
-
 const creditPackOptions: Array<{ planId: BillingPlanId; label: string; price: string }> = [
   { planId: "credits-500", label: "500 积分", price: "¥1 测试价" },
   { planId: "credits-1500", label: "1,500 积分", price: "¥1 测试价" },
@@ -1434,46 +1384,82 @@ const creditPackOptions: Array<{ planId: BillingPlanId; label: string; price: st
 ];
 
 function BillingPage({
+  account,
   credits,
   orders,
-  onCreateOrder
+  sessionState,
+  onCreateOrder,
+  onLogin,
+  onLogout
 }: {
+  account: AuthAccount | null;
   credits: number;
   orders: BillingOrder[];
+  sessionState: "logged-in" | "guest" | "expired";
   onCreateOrder: (planId: BillingPlanId) => void;
+  onLogin: () => void;
+  onLogout: () => void;
 }) {
+  const isLoggedIn = account !== null;
+  const displayName = account?.displayName || account?.username || "未登录";
   const visibleOrders = orders.slice(0, 5);
 
   return (
-    <section className="ai-workspace module-workspace billing-page" aria-label="积分购买">
-      <section className="billing-hero">
-        <div className="billing-panel">
-          <h1>购买积分后解锁全部功能。</h1>
-          <p className="lead">Flux Art 统一使用积分。文生图、图生图、保存资产、高清无水印下载都按积分消耗处理。</p>
-          <div className="balance"><div className="metric"><span>当前积分余额</span><strong>{credits}</strong><small>可用于所有生成与下载操作</small></div><div className="metric"><span>当前订单状态</span><strong>{visibleOrders[0] ? orderStatusLabel(visibleOrders[0]) : "暂无订单"}</strong><small>支付成功后积分立即到账</small></div></div>
-          <div className="notice">统一规则：余额足够即可使用全部功能；余额不足时只引导购买积分。</div>
-        </div>
-        <aside className="billing-panel"><h2>积分包</h2><div className="packs">{creditPackOptions.map(pack => <button className="pack" key={pack.planId} type="button" onClick={() => onCreateOrder(pack.planId)} aria-label={`购买 ${pack.label}`}><span>{pack.label}</span><strong>{pack.price}</strong></button>)}</div><button className="btn primary full" type="button" style={{ marginTop: 14 }} onClick={() => onCreateOrder("credits-1500")}>购买积分包</button></aside>
-      </section>
-      <section className="account-card stack" aria-label="最近订单">
-        <h2>最近订单</h2>
-        {visibleOrders.length === 0 && <div className="invoice"><strong>暂无订单</strong><span>购买后会显示支付与履约状态</span></div>}
-        {visibleOrders.map(order => (
-          <div className="invoice" key={order.orderId}>
-            <div>
-              <strong>{billingPlanLabel(order.planId)}</strong>
-              <p className="small">{order.outTradeNo || order.orderId} · {orderStatusLabel(order)}</p>
-            </div>
-            {(order.fulfillmentStatus === "retryable" || order.status === "failed") ? (
-              <button className="btn" type="button" onClick={() => onCreateOrder(order.planId)}>重新支付</button>
-            ) : order.paymentUrl && order.fulfillmentStatus !== "fulfilled" ? (
-              <a className="btn" href={order.paymentUrl}>继续支付</a>
-            ) : (
-              <span className={`status ${order.fulfillmentStatus === "fulfilled" ? "ok" : "wait"}`}>{orderStatusLabel(order)}</span>
-            )}
+    <section className="ai-workspace module-workspace billing-page account-credits-page" aria-label="账户与积分">
+      <section className="account-credits-top">
+        <div className="account-credits-user">
+          <span className={`status ${isLoggedIn ? "ok" : "wait"}`}>{isLoggedIn ? "已登录" : sessionState === "expired" ? "登录已过期" : "未登录"}</span>
+          <div>
+            <h1>{isLoggedIn ? displayName : "登录后可查看余额并购买积分"}</h1>
+            {account?.username && <p className="small">{account.username}</p>}
           </div>
-        ))}
+        </div>
+        <div className="account-credits-balance">
+          <span>可用积分</span>
+          <strong>{credits}</strong>
+          <small>可用于生成与下载</small>
+        </div>
+        {isLoggedIn ? (
+          <button className="btn" type="button" onClick={onLogout}>退出</button>
+        ) : (
+          <button className="btn primary" type="button" onClick={onLogin}>登录 / 注册</button>
+        )}
       </section>
+
+      {isLoggedIn && (
+        <>
+          <section className="account-credits-section stack" aria-label="积分包">
+            <div className="panel-head compact"><h2>积分包</h2></div>
+            <div className="packs account-credit-packs">
+              {creditPackOptions.map(pack => (
+                <button className="pack" key={pack.planId} type="button" onClick={() => onCreateOrder(pack.planId)} aria-label={`购买 ${pack.label}`}>
+                  <span>{pack.label}</span>
+                  <strong>{pack.price}</strong>
+                </button>
+              ))}
+            </div>
+          </section>
+          <section className="account-credits-section stack" aria-label="最近订单">
+            <div className="panel-head compact"><h2>最近订单</h2></div>
+            {visibleOrders.length === 0 && <div className="invoice"><strong>暂无订单</strong><span>购买后显示支付状态</span></div>}
+            {visibleOrders.map(order => (
+              <div className="invoice" key={order.orderId}>
+                <div>
+                  <strong>{billingPlanLabel(order.planId)}</strong>
+                  <p className="small">{order.outTradeNo || order.orderId} · {orderStatusLabel(order)}</p>
+                </div>
+                {(order.fulfillmentStatus === "retryable" || order.status === "failed") ? (
+                  <button className="btn" type="button" onClick={() => onCreateOrder(order.planId)}>重新支付</button>
+                ) : order.paymentUrl && order.fulfillmentStatus !== "fulfilled" ? (
+                  <a className="btn" href={order.paymentUrl}>继续支付</a>
+                ) : (
+                  <span className={`status ${order.fulfillmentStatus === "fulfilled" ? "ok" : "wait"}`}>{orderStatusLabel(order)}</span>
+                )}
+              </div>
+            ))}
+          </section>
+        </>
+      )}
     </section>
   );
 }
