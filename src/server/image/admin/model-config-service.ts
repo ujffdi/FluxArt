@@ -1,8 +1,8 @@
 import { getRepositories } from "@/server/data/repositories";
 import { getEnvImageModelConfig } from "@/server/image/ai/model-config";
-import { liveSecretRefProblem, looksLikeSecretValue, redactSecretValues } from "@/server/image/ai/secret-ref";
+import { isEncryptedSecretRef, liveSecretRefProblem, normalizeSecretRef, redactSecretValues, resolveApiKeySecret } from "@/server/image/ai/secret-ref";
 import type { ActiveImageModelConfigurationRecord } from "@/server/data/records";
-import type { EditableImageModelConfiguration, EditableSelectableImageModel, ModelConfigurationTestStatus } from "@/types/model-config";
+import type { EditableImageModelConfiguration, EditableSelectableImageModel, ModelConfigurationChange, ModelConfigurationTestStatus } from "@/types/model-config";
 
 export class ModelConfigurationError extends Error {
   constructor(message: string, public code: string, public status = 400) {
@@ -37,7 +37,7 @@ export const modelConfigurationPresets = [
       provider: "openai",
       model: "gpt-image-2",
       baseUrl: "https://api.openai.com/v1",
-      apiKeySecretRef: "FLUXART_IMAGE_API_KEY",
+      apiKeySecretRef: "OPENAI_API_KEY",
       executionMode: "mock",
       requestTimeoutMs: 120000,
       enabled: true,
@@ -63,7 +63,8 @@ export const modelConfigurationPresets = [
 ];
 
 const supportedProviders = new Set(["agnes", "openai", "custom"]);
-const secretRefMaxLength = 128;
+const secretRefMaxLength = 2048;
+const configuredSecretPlaceholder = "__FLUXART_CONFIGURED_MODEL_API_KEY__";
 
 function trimString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -88,7 +89,7 @@ export function validateModelConfiguration(input: unknown): EditableImageModelCo
   const provider = trimString(record.provider);
   const model = trimString(record.model);
   const baseUrl = trimString(record.baseUrl).replace(/\/+$/, "");
-  const apiKeySecretRef = trimString(record.apiKeySecretRef);
+  let apiKeySecretRef = trimString(record.apiKeySecretRef);
   const executionMode = record.executionMode === "live" ? "live" : record.executionMode === "mock" ? "mock" : undefined;
   const requestTimeoutMs = Number(record.requestTimeoutMs);
 
@@ -101,14 +102,12 @@ export function validateModelConfiguration(input: unknown): EditableImageModelCo
   if (!baseUrl || baseUrl.length > 512 || !validUrl(baseUrl)) {
     throw new ModelConfigurationError("baseUrl must be a valid http or https URL", "MODEL_BASE_URL_INVALID");
   }
-  if (!apiKeySecretRef || apiKeySecretRef.length > secretRefMaxLength) {
+  if (!apiKeySecretRef) {
     throw new ModelConfigurationError(`apiKeySecretRef must be 1-${secretRefMaxLength} characters`, "MODEL_SECRET_REF_INVALID");
   }
-  if (looksLikeSecretValue(apiKeySecretRef)) {
-    throw new ModelConfigurationError(
-      "apiKeySecretRef must be an environment variable name that contains the API key, not the API key value",
-      "MODEL_SECRET_REF_VALUE"
-    );
+  apiKeySecretRef = normalizeSecretRef(apiKeySecretRef);
+  if (apiKeySecretRef.length > secretRefMaxLength) {
+    throw new ModelConfigurationError(`apiKeySecretRef must be 1-${secretRefMaxLength} characters`, "MODEL_SECRET_REF_INVALID");
   }
   if (!executionMode) {
     throw new ModelConfigurationError("executionMode must be mock or live", "MODEL_EXECUTION_INVALID");
@@ -128,9 +127,27 @@ function slugId(value: string) {
   return value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
 }
 
-export function validateSelectableImageModels(input: unknown): EditableSelectableImageModel[] {
+function rawModelItems(input: unknown) {
   const record = typeof input === "object" && input !== null ? input as Record<string, unknown> : {};
-  const rawModels = Array.isArray(input) ? input : Array.isArray(record.models) ? record.models : [input];
+  return Array.isArray(input) ? input : Array.isArray(record.models) ? record.models : [input];
+}
+
+function resolveConfiguredSecretPlaceholders(input: unknown, existing: ActiveImageModelConfigurationRecord[]) {
+  const existingById = new Map(existing.map(model => [model.id, model.apiKeySecretRef]));
+  return rawModelItems(input).map((raw, index) => {
+    const item = typeof raw === "object" && raw !== null ? raw as Record<string, unknown> : {};
+    if (trimString(item.apiKeySecretRef) !== configuredSecretPlaceholder) return raw;
+    const id = slugId(trimString(item.id) || trimString(item.displayName) || trimString(item.model)) || `model-${index + 1}`;
+    const existingSecretRef = existingById.get(id);
+    if (!existingSecretRef) {
+      throw new ModelConfigurationError("输入新的 API Key 后再保存此模型配置", "MODEL_SECRET_REQUIRED");
+    }
+    return { ...item, apiKeySecretRef: existingSecretRef };
+  });
+}
+
+export function validateSelectableImageModels(input: unknown): EditableSelectableImageModel[] {
+  const rawModels = rawModelItems(input);
   const models = rawModels.map((raw, index) => {
     const item = typeof raw === "object" && raw !== null ? raw as Record<string, unknown> : {};
     const config = validateModelConfiguration(item);
@@ -207,33 +224,91 @@ function sameEditableConfig(left: EditableImageModelConfiguration, right: Editab
     && left.requestTimeoutMs === right.requestTimeoutMs;
 }
 
+function sameSelectableModel(left: EditableSelectableImageModel, right: EditableSelectableImageModel) {
+  return left.id === right.id
+    && left.displayName === right.displayName
+    && left.enabled === right.enabled
+    && left.isDefault === right.isDefault
+    && sameEditableConfig(left, right);
+}
+
+function editableFromActiveModel(config: ActiveImageModelConfigurationRecord): EditableSelectableImageModel {
+  return {
+    id: config.id,
+    displayName: config.displayName,
+    ...editableFromActive(config),
+    enabled: config.enabled,
+    isDefault: config.isDefault
+  };
+}
+
+function sameSelectableModelList(left: EditableSelectableImageModel[], right: EditableSelectableImageModel[]) {
+  if (left.length !== right.length) return false;
+  return left
+    .map(model => model.id)
+    .sort()
+    .every((id, index, sortedIds) => {
+      if (index > 0 && id === sortedIds[index - 1]) return false;
+      const leftModel = left.find(model => model.id === id);
+      const rightModel = right.find(model => model.id === id);
+      return !!leftModel && !!rightModel && sameSelectableModel(leftModel, rightModel);
+    });
+}
+
+function adminSafeEditableModel(model: EditableSelectableImageModel): EditableSelectableImageModel {
+  return {
+    ...model,
+    apiKeySecretRef: isEncryptedSecretRef(model.apiKeySecretRef) ? configuredSecretPlaceholder : model.apiKeySecretRef
+  };
+}
+
+function adminSafeActiveModel(model: ActiveImageModelConfigurationRecord): ActiveImageModelConfigurationRecord {
+  return {
+    ...model,
+    apiKeySecretRef: isEncryptedSecretRef(model.apiKeySecretRef) ? configuredSecretPlaceholder : model.apiKeySecretRef
+  };
+}
+
+function adminSafeChange<T extends ModelConfigurationChange>(change: T): T {
+  return {
+    ...change,
+    beforeConfig: change.beforeConfig?.map(adminSafeEditableModel),
+    afterConfig: change.afterConfig.map(adminSafeEditableModel)
+  };
+}
+
 export async function getModelAdministrationState() {
   const repositories = getRepositories();
   const configured = await repositories.modelConfig.listConfigurations();
   const fallback = activeFromEnv();
   const configurations = configured.length ? configured : [fallback];
   const active = configurations.find(model => model.enabled && model.isDefault) || configurations[0];
+  const changes = await repositories.modelConfig.listConfigurationChanges(10);
   return {
-    configuration: active,
-    configurations,
+    configuration: adminSafeActiveModel(active),
+    configurations: configurations.map(adminSafeActiveModel),
     configurationSource: configured.length ? "data" : "env",
-    changes: await repositories.modelConfig.listConfigurationChanges(10),
+    changes: changes.map(adminSafeChange),
     presets: modelConfigurationPresets
   };
 }
 
 export async function saveActiveModelConfiguration(input: unknown, changedByUserId: string) {
-  const models = validateSelectableImageModels(input);
   const repositories = getRepositories();
+  const existing = await repositories.modelConfig.listConfigurations();
+  const models = validateSelectableImageModels(resolveConfiguredSecretPlaceholders(input, existing));
   const result = await repositories.modelConfig.saveConfigurations({
     models,
     changedByUserId,
     changeType: "save"
   });
+  const changes = await repositories.modelConfig.listConfigurationChanges(10);
   return {
     ...result,
-    configuration: result.configurations.find(model => model.enabled && model.isDefault) || result.configurations[0],
-    changes: await repositories.modelConfig.listConfigurationChanges(10)
+    configuration: adminSafeActiveModel(result.configurations.find(model => model.enabled && model.isDefault) || result.configurations[0]),
+    configurations: result.configurations.map(adminSafeActiveModel),
+    change: adminSafeChange(result.change),
+    changes: changes.map(adminSafeChange)
   };
 }
 
@@ -243,6 +318,15 @@ export async function restoreModelConfiguration(changeId: string, changedByUserI
   if (!change) {
     throw new ModelConfigurationError("model configuration change was not found", "MODEL_CHANGE_NOT_FOUND", 404);
   }
+  const current = await repositories.modelConfig.listConfigurations();
+  if (sameSelectableModelList(current.map(editableFromActiveModel), change.afterConfig)) {
+    const changes = await repositories.modelConfig.listConfigurationChanges(10);
+    return {
+      configuration: adminSafeActiveModel(current.find(model => model.enabled && model.isDefault) || current[0]),
+      configurations: current.map(adminSafeActiveModel),
+      changes: changes.map(adminSafeChange)
+    };
+  }
   const result = await repositories.modelConfig.saveConfigurations({
     models: change.afterConfig,
     changedByUserId,
@@ -251,10 +335,13 @@ export async function restoreModelConfiguration(changeId: string, changedByUserI
     testStatus: change.testStatus,
     testError: change.testError
   });
+  const changes = await repositories.modelConfig.listConfigurationChanges(10);
   return {
     ...result,
-    configuration: result.configurations.find(model => model.enabled && model.isDefault) || result.configurations[0],
-    changes: await repositories.modelConfig.listConfigurationChanges(10)
+    configuration: adminSafeActiveModel(result.configurations.find(model => model.enabled && model.isDefault) || result.configurations[0]),
+    configurations: result.configurations.map(adminSafeActiveModel),
+    change: adminSafeChange(result.change),
+    changes: changes.map(adminSafeChange)
   };
 }
 
@@ -268,13 +355,14 @@ export interface ModelConfigurationTestResult {
 }
 
 async function testLiveModelConfiguration(config: EditableImageModelConfiguration) {
-  const secretRefProblem = liveSecretRefProblem(config.apiKeySecretRef);
+  const apiKeySecretRef = normalizeSecretRef(config.apiKeySecretRef);
+  const secretRefProblem = liveSecretRefProblem(apiKeySecretRef);
   if (secretRefProblem) {
     throw new ModelConfigurationError(secretRefProblem, "MODEL_SECRET_REF_INVALID");
   }
-  const apiKey = process.env[config.apiKeySecretRef];
+  const apiKey = resolveApiKeySecret(apiKeySecretRef);
   if (!apiKey) {
-    throw new ModelConfigurationError(`Missing ${config.apiKeySecretRef} for live ${config.provider} image generation`, "MODEL_AUTH_MISSING", 500);
+    throw new ModelConfigurationError(`Missing ${apiKeySecretRef} for live ${config.provider} image generation`, "MODEL_AUTH_MISSING", 500);
   }
 
   const controller = new AbortController();
@@ -317,8 +405,9 @@ async function testLiveModelConfiguration(config: EditableImageModelConfiguratio
 }
 
 export async function testModelConfiguration(input: unknown, changedByUserId: string) {
-  const config = validateModelConfiguration(input);
   const repositories = getRepositories();
+  const activeModels = await repositories.modelConfig.listConfigurations();
+  const config = validateModelConfiguration(resolveConfiguredSecretPlaceholders(input, activeModels)[0] || input);
   const active = await repositories.modelConfig.getActiveConfiguration();
   const startedAt = Date.now();
   const testedAt = new Date().toISOString();

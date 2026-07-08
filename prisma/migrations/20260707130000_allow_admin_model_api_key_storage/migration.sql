@@ -1,0 +1,2 @@
+ALTER TABLE `active_image_model_configurations`
+  MODIFY COLUMN `api_key_secret_ref` TEXT NOT NULL;

@@ -272,7 +272,7 @@ async function run() {
       await page.getByLabel("Provider").selectOption("custom");
       await page.getByLabel("Model").fill(smokeModel);
       await page.getByLabel("Base URL").fill(smokeBaseUrl);
-      await page.getByLabel("Secret Ref").fill(smokeSecretRef);
+      await page.getByLabel("API Key 或环境变量名").fill(smokeSecretRef);
       const modelTestResponse = page.waitForResponse(response => response.url().includes("/api/admin/model-config/test") && response.request().method() === "POST");
       await page.getByRole("button", { name: "测试" }).click();
       const modelTest = await modelTestResponse;
@@ -280,7 +280,7 @@ async function run() {
       await page.getByText("mock configuration accepted").waitFor({ timeout: 10000 });
       if (await page.getByLabel("Model").inputValue() !== smokeModel) fail("admin model test should preserve the unsaved model input");
       if (await page.getByLabel("Base URL").inputValue() !== smokeBaseUrl) fail("admin model test should preserve the unsaved base URL input");
-      if (await page.getByLabel("Secret Ref").inputValue() !== smokeSecretRef) fail("admin model test should preserve the unsaved secret ref input");
+      if (await page.getByLabel("API Key 或环境变量名").inputValue() !== smokeSecretRef) fail("admin model test should preserve the unsaved secret ref input");
       const savedSelectableModels = await page.evaluate(async () => {
         const response = await fetch("/api/admin/model-config", {
           method: "PUT",

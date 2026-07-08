@@ -1,7 +1,7 @@
 import sharp from "sharp";
 import type { CreateImageTaskInput } from "@/types/image";
 import { getImageModelConfig, type ImageModelConfig } from "./model-config";
-import { liveSecretRefProblem } from "./secret-ref";
+import { liveSecretRefProblem, normalizeSecretRef, resolveApiKeySecret } from "./secret-ref";
 
 export interface ImageModelGenerationInput extends CreateImageTaskInput {
   sourceImageUrl?: string;
@@ -154,12 +154,12 @@ export async function submitImageGeneration(input: ImageModelGenerationInput): P
   const timeoutMs = requestTimeoutMs(config);
 
   if (config.executionMode === "live") {
-    const apiKeySecretRef = config.apiKeySecretRef || "FLUXART_IMAGE_API_KEY";
+    const apiKeySecretRef = normalizeSecretRef(config.apiKeySecretRef || "FLUXART_IMAGE_API_KEY");
     const secretRefProblem = liveSecretRefProblem(apiKeySecretRef);
     if (secretRefProblem) {
       throw new Error(secretRefProblem);
     }
-    const apiKey = process.env[apiKeySecretRef];
+    const apiKey = resolveApiKeySecret(apiKeySecretRef);
     if (!apiKey) {
       throw new Error(`Missing ${apiKeySecretRef} for live ${provider} image generation`);
     }
@@ -223,12 +223,12 @@ export async function pollImageGenerationResult(input: AsyncPollInput): Promise<
     };
   }
 
-  const apiKeySecretRef = config.apiKeySecretRef || "FLUXART_IMAGE_API_KEY";
+  const apiKeySecretRef = normalizeSecretRef(config.apiKeySecretRef || "FLUXART_IMAGE_API_KEY");
   const secretRefProblem = liveSecretRefProblem(apiKeySecretRef);
   if (secretRefProblem) {
     throw new Error(secretRefProblem);
   }
-  const apiKey = process.env[apiKeySecretRef];
+  const apiKey = resolveApiKeySecret(apiKeySecretRef);
   if (!apiKey) {
     throw new Error(`Missing ${apiKeySecretRef} for live ${provider} image generation`);
   }

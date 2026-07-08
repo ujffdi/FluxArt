@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { FlaskConical, KeyRound, Plus, RefreshCw, RotateCcw, Save } from "lucide-react";
+import { FlaskConical, KeyRound, Plus, RefreshCw, RotateCcw, Save, Trash2 } from "lucide-react";
 import type { EditableSelectableImageModel, ModelConfigurationChange, SelectableImageModel } from "@/types/model-config";
 
 type Preset = {
@@ -39,6 +39,18 @@ const fallbackModel: EditableSelectableImageModel = {
   enabled: true,
   isDefault: true
 };
+
+const configuredSecretPlaceholder = "__FLUXART_CONFIGURED_MODEL_API_KEY__";
+
+function defaultSecretRefForProvider(provider: string) {
+  if (provider === "openai") return "OPENAI_API_KEY";
+  if (provider === "custom") return "CUSTOM_PROVIDER_API_KEY";
+  return "FLUXART_IMAGE_API_KEY";
+}
+
+function isDefaultSecretRef(value: string) {
+  return value === "FLUXART_IMAGE_API_KEY" || value === "OPENAI_API_KEY" || value === "CUSTOM_PROVIDER_API_KEY";
+}
 
 function editable(model: SelectableImageModel | EditableSelectableImageModel): EditableSelectableImageModel {
   return {
@@ -130,6 +142,21 @@ export function ModelConfigAdmin() {
     setModels(current => [...current, { ...model, id: nextId, displayName: `${model.displayName} ${current.length + 1}`, isDefault: false }]);
   }
 
+  function removeModel(modelId: string) {
+    setMessage("");
+    if (models.length <= 1) {
+      setMessage("至少保留一个模型配置");
+      return;
+    }
+    setModels(current => {
+      const removed = current.find(model => model.id === modelId);
+      const remaining = current.filter(model => model.id !== modelId);
+      if (!removed?.isDefault || remaining.some(model => model.isDefault)) return remaining;
+      const nextDefault = remaining.find(model => model.enabled) || remaining[0];
+      return remaining.map(model => model.id === nextDefault.id ? { ...model, enabled: true, isDefault: true } : { ...model, isDefault: false });
+    });
+  }
+
   async function saveConfig() {
     setBusy("save");
     setMessage("");
@@ -170,6 +197,7 @@ export function ModelConfigAdmin() {
   }
 
   async function restoreConfig(changeId: string) {
+    if (!window.confirm("恢复到这条历史配置？如果配置发生变化，系统会新增一条审计记录。")) return;
     setBusy(`restore:${changeId}`);
     setMessage("");
     try {
@@ -245,7 +273,18 @@ export function ModelConfigAdmin() {
                       <option value="mock">mock</option>
                       <option value="live">live</option>
                     </select>
-                    <select className="select" aria-label="Provider" value={model.provider} onChange={event => patchModel(model.id, { provider: event.target.value })}>
+                    <select
+                      className="select"
+                      aria-label="Provider"
+                      value={model.provider}
+                      onChange={event => {
+                        const provider = event.target.value;
+                        patchModel(model.id, {
+                          provider,
+                          ...(isDefaultSecretRef(model.apiKeySecretRef) || model.apiKeySecretRef === configuredSecretPlaceholder ? { apiKeySecretRef: defaultSecretRefForProvider(provider) } : {})
+                        });
+                      }}
+                    >
                       <option value="agnes">agnes</option>
                       <option value="openai">openai</option>
                       <option value="custom">custom</option>
@@ -254,13 +293,26 @@ export function ModelConfigAdmin() {
                   <input className="input" value={model.model} aria-label="Model" onChange={event => patchModel(model.id, { model: event.target.value })} />
                   <input className="input" value={model.baseUrl} aria-label="Base URL" onChange={event => patchModel(model.id, { baseUrl: event.target.value })} />
                   <div className="row">
-                    <input className="input" value={model.apiKeySecretRef} aria-label="Secret Ref" onChange={event => patchModel(model.id, { apiKeySecretRef: event.target.value })} />
+                    <input
+                      className="input"
+                      value={model.apiKeySecretRef === configuredSecretPlaceholder ? "已配置，不回显" : model.apiKeySecretRef}
+                      aria-label="API Key 或环境变量名"
+                      placeholder="可填 OPENAI_API_KEY 或 sk-..."
+                      onFocus={() => {
+                        if (model.apiKeySecretRef === configuredSecretPlaceholder) patchModel(model.id, { apiKeySecretRef: "" });
+                      }}
+                      onBlur={() => {
+                        if (!model.apiKeySecretRef.trim()) patchModel(model.id, { apiKeySecretRef: configuredSecretPlaceholder });
+                      }}
+                      onChange={event => patchModel(model.id, { apiKeySecretRef: event.target.value })}
+                    />
                     <input className="input" type="number" min={1000} max={1800000} step={1000} value={model.requestTimeoutMs} aria-label="Timeout ms" onChange={event => patchModel(model.id, { requestTimeoutMs: Number(event.target.value) })} />
                   </div>
                   <div className="row">
                     <label className="small"><input type="checkbox" checked={model.enabled} onChange={event => patchModel(model.id, { enabled: event.target.checked })} /> enabled</label>
                     <label className="small"><input type="radio" name="default-model" checked={model.isDefault} onChange={() => patchModel(model.id, { isDefault: true })} /> default</label>
                     <button className="btn" type="button" onClick={() => void testConfig(model)} disabled={busy === "test"}><FlaskConical size={17} aria-hidden="true" /> 测试</button>
+                    <button className="btn" type="button" onClick={() => removeModel(model.id)} disabled={models.length <= 1} title="删除此模型配置" aria-label="删除此模型配置"><Trash2 size={17} aria-hidden="true" /> 删除</button>
                   </div>
                 </div>
               </article>
@@ -289,8 +341,9 @@ export function ModelConfigAdmin() {
                     <strong>{defaultModel?.displayName || "Model list"}</strong>
                     <span>{change.changeType} · {change.afterConfig.length} models · {formatTime(change.createdAt)}</span>
                   </div>
-                  <button className="btn icon" type="button" onClick={() => void restoreConfig(change.id)} disabled={busy === `restore:${change.id}`} title="恢复此配置" aria-label="恢复此配置">
+                  <button className="btn" type="button" onClick={() => void restoreConfig(change.id)} disabled={busy === `restore:${change.id}`} title="恢复此历史配置" aria-label="恢复此历史配置">
                     <RotateCcw size={17} aria-hidden="true" />
+                    恢复
                   </button>
                 </article>
               );

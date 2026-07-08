@@ -148,7 +148,7 @@ async function run() {
   const { createTask, deleteAsset, listAssets, runImageTask, transitionTaskState } = await import("../src/server/image/business/image-service");
   const { storeGeneratedAsset } = await import("../src/server/image/storage/upload-service");
   const { submitImageGeneration } = await import("../src/server/image/ai/image-model-adapter");
-  const { testModelConfiguration } = await import("../src/server/image/admin/model-config-service");
+  const { modelConfigurationPresets, restoreModelConfiguration, saveActiveModelConfiguration, validateModelConfiguration } = await import("../src/server/image/admin/model-config-service");
   const { TaskCapabilityError, TaskConcurrencyError } = await import("../src/server/image/business/task-policy");
   const { creditValidUntilIso } = await import("../src/server/credits/credit-validity");
 
@@ -156,20 +156,57 @@ async function run() {
     creditValidUntilIso(new Date("2026-01-31T12:34:56.000Z")) === "2026-02-28T12:34:56.000Z",
     "credit validity should add one calendar month and clamp end-of-month dates"
   );
+  expect(modelConfigurationPresets.find(preset => preset.id === "openai-compatible")?.config.apiKeySecretRef === "OPENAI_API_KEY", "OpenAI model preset should use OPENAI_API_KEY as its default secret ref");
+  const encryptedPastedKeyConfig = validateModelConfiguration({
+    provider: "agnes",
+    model: "agnes-image-2.1-flash",
+    baseUrl: "https://apihub.agnes-ai.com/v1",
+    apiKeySecretRef: "sk-test-secret-value-that-should-not-be-returned",
+    executionMode: "live",
+    requestTimeoutMs: 1000
+  });
+  expect(encryptedPastedKeyConfig.apiKeySecretRef.startsWith("enc:v1:"), "pasted model API keys should be stored as encrypted secret refs");
+  expect(!encryptedPastedKeyConfig.apiKeySecretRef.includes("sk-test-secret-value"), "encrypted model API key refs should not expose pasted API key values");
+  const previousFluxArtImageApiKeyForSecretRef = process.env.FLUXART_IMAGE_API_KEY;
+  process.env.FLUXART_IMAGE_API_KEY = "sk-smoke-secret-ref-normalized";
   try {
-    await testModelConfiguration({
+    const normalizedSecretRefConfig = validateModelConfiguration({
       provider: "agnes",
       model: "agnes-image-2.1-flash",
       baseUrl: "https://apihub.agnes-ai.com/v1",
-      apiKeySecretRef: "sk-test-secret-value-that-should-not-be-returned",
+      apiKeySecretRef: "sk-smoke-secret-ref-normalized",
       executionMode: "live",
       requestTimeoutMs: 1000
+    });
+    expect(normalizedSecretRefConfig.apiKeySecretRef === "FLUXART_IMAGE_API_KEY", "live model config should normalize a pasted key that already exists in the server environment");
+  } finally {
+    if (previousFluxArtImageApiKeyForSecretRef) process.env.FLUXART_IMAGE_API_KEY = previousFluxArtImageApiKeyForSecretRef;
+    else delete process.env.FLUXART_IMAGE_API_KEY;
+  }
+  const restoreStore = createMockDataStore();
+  setRepositoriesForTesting(createMockRepositories(restoreStore));
+  try {
+    const savedConfig = await saveActiveModelConfiguration({
+      models: [{
+        id: "default-image-model",
+        displayName: "Default Image Model",
+        provider: "agnes",
+        model: "agnes-image-2.1-flash",
+        baseUrl: "https://apihub.agnes-ai.com/v1",
+        apiKeySecretRef: "sk-admin-configured-secret-value",
+        executionMode: "mock",
+        requestTimeoutMs: 120000,
+        enabled: true,
+        isDefault: true
+      }]
     }, "usr-smoke");
-    throw new Error("expected pasted API key secret ref to be rejected");
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    expect(message.includes("environment variable"), "live model test failures should explain that apiKeySecretRef expects an environment variable name");
-    expect(!message.includes("sk-test-secret-value"), "live model test failures should not echo pasted API key values");
+    expect(savedConfig.changes.length === 1, "model config save should create one audit change");
+    expect(restoreStore.activeImageModelConfigurations[0].apiKeySecretRef.startsWith("enc:v1:"), "admin-entered model API keys should be persisted as encrypted refs");
+    expect(savedConfig.configurations[0]?.apiKeySecretRef === "__FLUXART_CONFIGURED_MODEL_API_KEY__", "model admin responses should not echo stored API keys");
+    const restoredConfig = await restoreModelConfiguration(savedConfig.changes[0].id, "usr-smoke");
+    expect(restoredConfig.changes.length === 1, "restoring an identical active model configuration should not append duplicate audit changes");
+  } finally {
+    setRepositoriesForTesting(undefined);
   }
   const userId = "usr-smoke";
   const now = new Date("2026-06-24T00:00:00.000Z");
@@ -224,6 +261,55 @@ async function run() {
   expect((await repositories.modelConfig.listConfigurationChanges(5)).length === 1, "Prisma adapter should list model configuration changes");
   const activeModelConfig = await repositories.modelConfig.getActiveConfiguration();
   expect(activeModelConfig?.requestTimeoutMs === 660000, "Prisma adapter should read the active image model configuration");
+  await repositories.modelConfig.saveConfigurations({
+    models: [
+      {
+        id: "delete-candidate-model",
+        displayName: "Delete Candidate Model",
+        provider: "custom",
+        model: "delete-candidate-runtime-model",
+        baseUrl: "https://provider.example.test/v1",
+        apiKeySecretRef: "DELETE_CANDIDATE_PROVIDER_KEY",
+        executionMode: "mock",
+        requestTimeoutMs: 120000,
+        enabled: true,
+        isDefault: true
+      },
+      {
+        id: "remaining-model",
+        displayName: "Remaining Model",
+        provider: "custom",
+        model: "remaining-runtime-model",
+        baseUrl: "https://provider.example.test/v1",
+        apiKeySecretRef: "REMAINING_PROVIDER_KEY",
+        executionMode: "mock",
+        requestTimeoutMs: 120000,
+        enabled: true,
+        isDefault: false
+      }
+    ],
+    changedByUserId: userId,
+    changeType: "save"
+  });
+  await repositories.modelConfig.saveConfigurations({
+    models: [{
+      id: "remaining-model",
+      displayName: "Remaining Model",
+      provider: "custom",
+      model: "remaining-runtime-model",
+      baseUrl: "https://provider.example.test/v1",
+      apiKeySecretRef: "REMAINING_PROVIDER_KEY",
+      executionMode: "mock",
+      requestTimeoutMs: 120000,
+      enabled: true,
+      isDefault: true
+    }],
+    changedByUserId: userId,
+    changeType: "save"
+  });
+  const remainingModelConfigs = await repositories.modelConfig.listConfigurations();
+  expect(remainingModelConfigs.length === 1 && remainingModelConfigs[0].id === "remaining-model", "Prisma adapter should hide deleted selectable model configurations");
+  expect(!!delegates.activeImageModelConfiguration.rows.find(row => row.id === "delete-candidate-model")?.deletedAt, "Prisma adapter should soft-delete removed selectable model configurations");
 
   const rawActiveModelRows: DbRecord[] = [];
   const rawModelChangeRows: DbRecord[] = [];
@@ -269,6 +355,7 @@ async function run() {
           rawActiveModelColumns.add("display_name");
           rawActiveModelColumns.add("enabled");
           rawActiveModelColumns.add("is_default");
+          rawActiveModelColumns.add("deleted_at");
         }
         return 0;
       }
@@ -277,6 +364,11 @@ async function run() {
         if (!rawActiveModelTableExists) throwMissingRawTable("active_image_model_configurations");
         const column = query.match(/ADD COLUMN `([^`]+)`/)?.[1];
         if (column) rawActiveModelColumns.add(column);
+        return 0;
+      }
+
+      if (query.includes("ALTER TABLE active_image_model_configurations MODIFY COLUMN `api_key_secret_ref`")) {
+        if (!rawActiveModelTableExists) throwMissingRawTable("active_image_model_configurations");
         return 0;
       }
 
@@ -319,7 +411,10 @@ async function run() {
         if (!rawActiveModelTableExists) throwMissingRawTable("active_image_model_configurations");
         if (query.includes("SET enabled = false")) {
           for (const row of rawActiveModelRows) {
-            if (!values.includes(row.id)) row.enabled = false;
+            if (!values.slice(1).includes(row.id)) {
+              row.enabled = false;
+              row.deletedAt = values[0] as RecordValue;
+            }
           }
           return 1;
         }
@@ -367,7 +462,11 @@ async function run() {
       if (query.includes("FROM INFORMATION_SCHEMA.COLUMNS")) {
         const tableName = String(values[0] || "");
         if (tableName !== "active_image_model_configurations" || !rawActiveModelTableExists) return [];
-        return [...rawActiveModelColumns].map(columnName => ({ columnName }));
+        return [...rawActiveModelColumns].map(columnName => ({
+          columnName,
+          dataType: columnName === "deleted_at" ? "datetime" : "varchar",
+          characterMaximumLength: columnName === "api_key_secret_ref" ? 128 : 191
+        }));
       }
 
       if (query.includes("FROM active_image_model_configurations")) {
@@ -376,7 +475,9 @@ async function run() {
           const record = rawActiveModelRows.find(item => item.id === String(values[0] || "active"));
           return record ? [record] : [];
         }
-        return rawActiveModelRows;
+        return query.includes("deleted_at IS NULL")
+          ? rawActiveModelRows.filter(row => row.deletedAt === null || row.deletedAt === undefined)
+          : rawActiveModelRows;
       }
 
       if (query.includes("FROM model_configuration_changes")) {

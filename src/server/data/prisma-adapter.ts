@@ -348,6 +348,7 @@ const activeModelConfigurationSelect = `
     last_tested_at AS lastTestedAt,
     last_test_error AS lastTestError,
     updated_by_user_id AS updatedByUserId,
+    deleted_at AS deletedAt,
     created_at AS createdAt,
     updated_at AS updatedAt
   FROM active_image_model_configurations
@@ -375,7 +376,7 @@ const createActiveModelConfigurationTableSql = `
     \`provider\` VARCHAR(64) NOT NULL,
     \`model_name\` VARCHAR(120) NOT NULL,
     \`base_url\` VARCHAR(512) NOT NULL,
-    \`api_key_secret_ref\` VARCHAR(128) NOT NULL,
+    \`api_key_secret_ref\` TEXT NOT NULL,
     \`execution_mode\` VARCHAR(16) NOT NULL,
     \`request_timeout_ms\` INT NOT NULL,
     \`enabled\` BOOLEAN NOT NULL DEFAULT true,
@@ -384,6 +385,7 @@ const createActiveModelConfigurationTableSql = `
     \`last_tested_at\` DATETIME(3) NULL,
     \`last_test_error\` VARCHAR(512) NULL,
     \`updated_by_user_id\` VARCHAR(191) NULL,
+    \`deleted_at\` DATETIME(3) NULL,
     \`created_at\` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     \`updated_at\` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     PRIMARY KEY (\`id\`)
@@ -412,7 +414,8 @@ const createModelConfigurationChangesTableSql = `
 const activeModelConfigurationColumnDefinitions: Record<string, string> = {
   display_name: "`display_name` VARCHAR(120) NOT NULL DEFAULT 'Default Image Model' AFTER `id`",
   enabled: "`enabled` BOOLEAN NOT NULL DEFAULT true AFTER `request_timeout_ms`",
-  is_default: "`is_default` BOOLEAN NOT NULL DEFAULT false AFTER `enabled`"
+  is_default: "`is_default` BOOLEAN NOT NULL DEFAULT false AFTER `enabled`",
+  deleted_at: "`deleted_at` DATETIME(3) NULL AFTER `updated_by_user_id`"
 };
 
 function requireModelConfigRawSql(client: PrismaClientLike): RawSqlPrismaClient {
@@ -433,16 +436,31 @@ function hasDatabaseErrorCode(error: unknown, code: string) {
 
 async function ensureActiveModelConfigurationColumns(client: RawSqlPrismaClient) {
   const rows = await client.$queryRawUnsafe(
-    `SELECT COLUMN_NAME AS columnName
+    `SELECT
+       COLUMN_NAME AS columnName,
+       DATA_TYPE AS dataType,
+       CHARACTER_MAXIMUM_LENGTH AS characterMaximumLength
      FROM INFORMATION_SCHEMA.COLUMNS
      WHERE TABLE_SCHEMA = DATABASE()
        AND TABLE_NAME = ?`,
     "active_image_model_configurations"
   );
-  const columns = new Set((Array.isArray(rows) ? rows : []).map(row => {
+  const columnRecords = Array.isArray(rows) ? rows : [];
+  const columns = new Set(columnRecords.map(row => {
     const record = isDbRecord(row) ? row : {};
     return asString(record.columnName || record.COLUMN_NAME);
   }).filter(Boolean));
+  const columnInfoEntries: Array<[string, { dataType: string; maxLength: number }]> = [];
+  for (const row of columnRecords) {
+    const record = isDbRecord(row) ? row : {};
+    const name = asString(record.columnName || record.COLUMN_NAME);
+    if (!name) continue;
+    columnInfoEntries.push([name, {
+      dataType: asString(record.dataType || record.DATA_TYPE).toLowerCase(),
+      maxLength: asNumber(record.characterMaximumLength || record.CHARACTER_MAXIMUM_LENGTH)
+    }]);
+  }
+  const columnInfo = new Map(columnInfoEntries);
 
   for (const [columnName, definition] of Object.entries(activeModelConfigurationColumnDefinitions)) {
     if (columns.has(columnName)) continue;
@@ -451,6 +469,10 @@ async function ensureActiveModelConfigurationColumns(client: RawSqlPrismaClient)
     } catch (error) {
       if (!hasDatabaseErrorCode(error, "1060")) throw error;
     }
+  }
+  const secretRefColumn = columnInfo.get("api_key_secret_ref");
+  if (secretRefColumn && secretRefColumn.dataType !== "text") {
+    await client.$executeRawUnsafe("ALTER TABLE active_image_model_configurations MODIFY COLUMN `api_key_secret_ref` TEXT NOT NULL");
   }
 
   await client.$executeRawUnsafe(
@@ -491,11 +513,11 @@ async function findActiveModelConfigurationRecord(client: PrismaClientLike) {
 async function listActiveModelConfigurationRecords(client: PrismaClientLike) {
   await maybeEnsureModelConfigTables(client);
   if (client.activeImageModelConfiguration?.findMany) {
-    return client.activeImageModelConfiguration.findMany({ orderBy: { createdAt: "asc" } });
+    return client.activeImageModelConfiguration.findMany({ where: { deletedAt: null }, orderBy: { createdAt: "asc" } });
   }
 
   const rawClient = requireModelConfigRawSql(client);
-  return rawClient.$queryRawUnsafe(`${activeModelConfigurationSelect} ORDER BY created_at ASC`);
+  return rawClient.$queryRawUnsafe(`${activeModelConfigurationSelect} WHERE deleted_at IS NULL ORDER BY created_at ASC`);
 }
 
 async function saveSelectableModelConfigurationRecords(client: PrismaClientLike, models: DbRecord[]) {
@@ -503,14 +525,14 @@ async function saveSelectableModelConfigurationRecords(client: PrismaClientLike,
   const ids = models.map(model => asString(model.id)).filter(Boolean);
   if (delegate) {
     if (delegate.updateMany && ids.length) {
-      await delegate.updateMany({ where: { id: { notIn: ids } }, data: { enabled: false } });
+      await delegate.updateMany({ where: { id: { notIn: ids }, deletedAt: null }, data: { enabled: false, deletedAt: new Date() } });
     }
     const saved: DbRecord[] = [];
     for (const model of models) {
       const existing = delegate.findUnique ? await delegate.findUnique({ where: { id: model.id } }) : null;
       const { createdAt, ...updateData } = model;
       const record = existing && delegate.update
-        ? await delegate.update({ where: { id: model.id }, data: updateData })
+        ? await delegate.update({ where: { id: model.id }, data: { ...updateData, deletedAt: null } })
         : await delegate.create({ data: { ...model, createdAt: createdAt || model.updatedAt } });
       saved.push(record);
     }
@@ -520,7 +542,8 @@ async function saveSelectableModelConfigurationRecords(client: PrismaClientLike,
   const rawClient = requireModelConfigRawSql(client);
   if (ids.length) {
     await rawClient.$executeRawUnsafe(
-      `UPDATE active_image_model_configurations SET enabled = false WHERE id NOT IN (${ids.map(() => "?").join(", ")})`,
+      `UPDATE active_image_model_configurations SET enabled = false, deleted_at = ? WHERE deleted_at IS NULL AND id NOT IN (${ids.map(() => "?").join(", ")})`,
+      toMysqlDateTime(new Date()),
       ...ids
     );
   }
@@ -562,6 +585,7 @@ async function saveSelectableModelConfigurationRecords(client: PrismaClientLike,
        last_tested_at = VALUES(last_tested_at),
        last_test_error = VALUES(last_test_error),
        updated_by_user_id = VALUES(updated_by_user_id),
+       deleted_at = NULL,
        updated_at = VALUES(updated_at)`,
     data.id,
     data.displayName,
