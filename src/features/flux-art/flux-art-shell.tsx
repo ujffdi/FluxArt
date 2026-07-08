@@ -302,7 +302,6 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
   const [customHeight, setCustomHeight] = useState(1024);
   const [stylePreset, setStylePreset] = useState(stylePresetOptions[0]);
   const reconciliationInFlight = useRef(false);
-  const modelFallbackNoticeRef = useRef("");
 
   const credits = creditsSummary?.credits ?? 0;
   const hasServerSession = authAccount !== null;
@@ -476,11 +475,18 @@ export function FluxArtShell({ activePage }: { activePage: ProductPage }) {
 
   useEffect(() => {
     if (modelSelection?.fallbackReason !== "unavailable_preference") return;
-    const key = `${authAccount?.userId || "guest"}:${modelSelection.selectedImageModelId}`;
-    if (modelFallbackNoticeRef.current === key) return;
-    modelFallbackNoticeRef.current = key;
+    if (!authAccount?.userId || !modelSelection.preferredImageModelId) return;
+    const key = `${authAccount.userId}:${modelSelection.preferredImageModelId}:${modelSelection.defaultModel.id}`;
+    if (store.modelFallbackNoticeKey === key) return;
+    store.markModelFallbackNoticeSeen(key);
     store.showToast("原模型不可用，已切换到默认模型");
-  }, [authAccount?.userId, modelSelection?.fallbackReason, modelSelection?.selectedImageModelId, store]);
+  }, [
+    authAccount?.userId,
+    modelSelection?.defaultModel.id,
+    modelSelection?.fallbackReason,
+    modelSelection?.preferredImageModelId,
+    store
+  ]);
 
   useEffect(() => {
     if (!store.toast) return;

@@ -13,6 +13,7 @@ interface ImageWorkspaceState {
   selectedAssetId: string;
   sessionState: SessionState;
   toast: string;
+  modelFallbackNoticeKey: string;
   customSizeVisible: boolean;
   generationCount: number;
   referenceStrength: number;
@@ -23,6 +24,7 @@ interface ImageWorkspaceState {
   setSessionState: (state: SessionState) => void;
   showToast: (toast: string) => void;
   clearToast: () => void;
+  markModelFallbackNoticeSeen: (key: string) => void;
   setCustomSizeVisible: (visible: boolean) => void;
   setGenerationCount: (count: number) => void;
   setReferenceStrength: (value: number) => void;
@@ -41,6 +43,7 @@ export const useImageWorkspaceStore = create<ImageWorkspaceState>()(
       selectedAssetId: "IMG-1832",
       sessionState: "guest",
       toast: "",
+      modelFallbackNoticeKey: "",
       customSizeVisible: false,
       generationCount: 4,
       referenceStrength: 62,
@@ -51,6 +54,7 @@ export const useImageWorkspaceStore = create<ImageWorkspaceState>()(
       setSessionState: sessionState => set({ sessionState }),
       showToast: toast => set({ toast }),
       clearToast: () => set({ toast: "" }),
+      markModelFallbackNoticeSeen: modelFallbackNoticeKey => set({ modelFallbackNoticeKey }),
       setCustomSizeVisible: customSizeVisible => set({ customSizeVisible }),
       setGenerationCount: generationCount => set({ generationCount }),
       setReferenceStrength: referenceStrength => set({ referenceStrength }),

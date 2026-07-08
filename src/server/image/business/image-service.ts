@@ -45,9 +45,11 @@ function relativeDifference(left: number, right: number) {
 function dimensionsAreCloseEnough(output: StoredGeneratedOutput, expectedWidth: number, expectedHeight: number) {
   const expectedAspectRatio = expectedWidth / expectedHeight;
   const outputAspectRatio = output.width / output.height;
+  const minimumWidth = expectedWidth * (1 - outputReviewDimensionTolerance);
+  const minimumHeight = expectedHeight * (1 - outputReviewDimensionTolerance);
   return relativeDifference(outputAspectRatio, expectedAspectRatio) <= outputReviewAspectRatioTolerance
-    && relativeDifference(output.width, expectedWidth) <= outputReviewDimensionTolerance
-    && relativeDifference(output.height, expectedHeight) <= outputReviewDimensionTolerance;
+    && output.width >= minimumWidth
+    && output.height >= minimumHeight;
 }
 
 function includesText(value: string, q: string) {
@@ -249,7 +251,7 @@ async function reviewStoredOutput(output: StoredGeneratedOutput, expectedSize?: 
   if (expectedSize) {
     const [expectedWidth, expectedHeight] = expectedSize.split("x").map(value => Number(value));
     if (expectedWidth && expectedHeight && !dimensionsAreCloseEnough(output, expectedWidth, expectedHeight)) {
-      return { approved: false, reason: "output review rejected unexpected dimensions" };
+      return { approved: false, reason: `output review rejected unexpected dimensions: expected ${expectedWidth}x${expectedHeight}, got ${output.width}x${output.height}` };
     }
   }
   if (output.sizeBytes < 128) {
@@ -392,12 +394,20 @@ async function continueAsyncImageTask(task: ImageGenerationTask, userId?: string
   const providerSubmissionId = typeof task.requestPayload.providerSubmissionId === "string" ? task.requestPayload.providerSubmissionId : undefined;
   const externalTaskId = typeof task.requestPayload.externalTaskId === "string" ? task.requestPayload.externalTaskId : undefined;
   if (!providerSubmissionId || !externalTaskId) return task;
+  const modelConfig = await modelConfigFromTaskSnapshot(task);
+  const lastRunnerUpdate = Date.parse(task.updatedAt || task.createdAt);
+  if (Number.isFinite(lastRunnerUpdate) && Date.now() - lastRunnerUpdate > modelConfig.requestTimeoutMs) {
+    return transitionTaskState(task.id, "failed", userId, {
+      errorCode: "TASK_RUNNER_TIMEOUT",
+      errorMessage: `${task.modelProvider} async image result timed out after ${modelConfig.requestTimeoutMs}ms`
+    });
+  }
 
   const submission = await pollImageGenerationResult({
     provider: String(task.modelProvider),
     modelName: task.modelName,
     externalTaskId,
-    modelConfig: await modelConfigFromTaskSnapshot(task)
+    modelConfig
   });
   const outputBytesList = outputBytesListFromSubmission(submission);
   if (submission.providerMode !== "sync" || outputBytesList.length === 0) return task;
@@ -416,25 +426,27 @@ export async function runImageTask(taskId: string, userId?: string) {
     }
     if (task.status !== "queued") return task;
 
-    await transitionTaskState(task.id, "running", userId);
-    const sourceAsset = task.sourceAssetId ? await getAsset(task.sourceAssetId, userId) : undefined;
+    const claimedTask = await repositories.image.claimQueuedTask(task.id);
+    if (!claimedTask) return getTask(task.id, userId);
+
+    const sourceAsset = claimedTask.sourceAssetId ? await getAsset(claimedTask.sourceAssetId, userId) : undefined;
     const submission = await submitImageGeneration({
-      taskType: task.taskType,
-      prompt: task.prompt,
-      negativePrompt: task.negativePrompt,
-      sourceAssetId: task.sourceAssetId,
+      taskType: claimedTask.taskType,
+      prompt: claimedTask.prompt,
+      negativePrompt: claimedTask.negativePrompt,
+      sourceAssetId: claimedTask.sourceAssetId,
       sourceImageUrl: sourceAsset?.publicUrl || sourceAsset?.imageUrl,
-      size: requestPayloadString(task.requestPayload, "size") || "1024x1024",
-      count: requestPayloadNumber(task.requestPayload, "count") || 1,
-      stylePreset: requestPayloadString(task.requestPayload, "stylePreset"),
-      strength: requestPayloadNumber(task.requestPayload, "strength"),
-      structureMode: requestPayloadStructureMode(task.requestPayload),
-      modelConfig: await modelConfigFromTaskSnapshot(task)
+      size: requestPayloadString(claimedTask.requestPayload, "size") || "1024x1024",
+      count: requestPayloadNumber(claimedTask.requestPayload, "count") || 1,
+      stylePreset: requestPayloadString(claimedTask.requestPayload, "stylePreset"),
+      strength: requestPayloadNumber(claimedTask.requestPayload, "strength"),
+      structureMode: requestPayloadStructureMode(claimedTask.requestPayload),
+      modelConfig: await modelConfigFromTaskSnapshot(claimedTask)
     });
-    const submissionId = `submission-${task.id}`;
+    const submissionId = `submission-${claimedTask.id}`;
     await repositories.image.createProviderSubmission({
       id: submissionId,
-      taskId: task.id,
+      taskId: claimedTask.id,
       provider: submission.provider,
       modelName: submission.modelName,
       providerMode: submission.providerMode,
@@ -443,24 +455,25 @@ export async function runImageTask(taskId: string, userId?: string) {
         estimatedDurationMs: submission.estimatedDurationMs,
         hasSynchronousOutput: Boolean(submission.outputBytesList?.length || submission.outputBytes),
         outputCount: submission.outputBytesList?.length || (submission.outputBytes ? 1 : 0),
-        taskType: task.taskType,
-        size: typeof task.requestPayload.size === "string" ? task.requestPayload.size : "1024x1024"
+        taskType: claimedTask.taskType,
+        size: typeof claimedTask.requestPayload.size === "string" ? claimedTask.requestPayload.size : "1024x1024"
       },
       externalTaskId: submission.externalTaskId,
       createdAt: new Date().toISOString()
     });
-    await repositories.image.updateTask(task.id, {
+    const taskWithSubmission = await repositories.image.updateTask(claimedTask.id, {
       requestPayload: {
-        ...task.requestPayload,
+        ...claimedTask.requestPayload,
         externalTaskId: submission.externalTaskId,
         providerMode: submission.providerMode,
         providerSubmissionId: submissionId
       }
     });
+    const runnableTask = taskWithSubmission || claimedTask;
 
     const outputBytesList = outputBytesListFromSubmission(submission);
     if (submission.providerMode !== "sync" || outputBytesList.length === 0) {
-      const externalTaskId = String(submission.externalTaskId || task.id);
+      const externalTaskId = String(submission.externalTaskId || claimedTask.id);
       await repositories.image.createProviderResult({
         id: `provider-result-${randomUUID()}`,
         submissionId,
@@ -472,10 +485,10 @@ export async function runImageTask(taskId: string, userId?: string) {
         },
         createdAt: new Date().toISOString()
       });
-      return getTask(task.id, userId);
+      return getTask(claimedTask.id, userId);
     }
 
-    return storeReviewAndFinalizeTask(task, submissionId, outputBytesList, userId);
+    return storeReviewAndFinalizeTask(runnableTask, submissionId, outputBytesList, userId);
   } catch (error) {
     const message = error instanceof Error ? error.message : "task runner failed";
     return transitionTaskState(task.id, "failed", userId, { errorCode: "TASK_RUNNER_FAILED", errorMessage: message });

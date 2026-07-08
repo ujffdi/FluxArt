@@ -147,6 +147,30 @@ async function outputBytesFromPayload(payload: unknown, provider: string) {
   return outputBytesList;
 }
 
+function asyncExternalTaskIdFromPayload(payload: unknown) {
+  if (!isRecord(payload)) return undefined;
+  for (const key of ["id", "task_id", "taskId", "job_id", "jobId"]) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return undefined;
+}
+
+async function providerErrorMessage(response: Response, provider: string, operation: string) {
+  const body = await response.text();
+  const compactBody = body.replace(/\s+/g, " ").trim();
+  const isHtml = /<html[\s>]/i.test(body) || /<title>/i.test(body);
+  if (response.status === 504) {
+    return `${provider} ${operation} failed: upstream gateway timeout (504)`;
+  }
+  if ((response.status === 502 || response.status === 503) && isHtml) {
+    return `${provider} ${operation} failed: upstream service unavailable (${response.status})`;
+  }
+  return compactBody
+    ? `${provider} ${operation} failed: ${response.status} ${compactBody.slice(0, 240)}`
+    : `${provider} ${operation} failed: ${response.status}`;
+}
+
 export async function submitImageGeneration(input: ImageModelGenerationInput): Promise<ModelSubmission> {
   const config = input.modelConfig || await getImageModelConfig();
   const provider = config.provider;
@@ -174,16 +198,21 @@ export async function submitImageGeneration(input: ImageModelGenerationInput): P
     }, `${provider} image generation`, timeoutMs);
 
     if (!response.ok) {
-      throw new Error(`${provider} image generation failed: ${response.status} ${await response.text()}`);
+      throw new Error(await providerErrorMessage(response, provider, "image generation"));
     }
 
     const payload = await response.json().catch(() => undefined);
     const outputBytesList = await outputBytesFromPayload(payload, provider);
+    const externalTaskId = asyncExternalTaskIdFromPayload(payload) || response.headers.get("x-request-id") || `${String(provider).toUpperCase()}-${Date.now().toString(36)}`;
+
+    if (!outputBytesList.length && !process.env.IMAGE_MODEL_ASYNC_RESULT_URL_TEMPLATE) {
+      throw new Error(`${provider} image generation returned no image output and no async result endpoint is configured`);
+    }
 
     return {
       provider,
       modelName,
-      externalTaskId: response.headers.get("x-request-id") || `${String(provider).toUpperCase()}-${Date.now().toString(36)}`,
+      externalTaskId,
       estimatedDurationMs: input.taskType === "t2i" ? 12000 : 18000,
       providerMode: outputBytesList.length ? "sync" : "async",
       outputBytes: outputBytesList[0],

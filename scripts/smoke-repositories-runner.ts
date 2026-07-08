@@ -826,6 +826,7 @@ async function run() {
   const previousBaseUrl = process.env.IMAGE_MODEL_BASE_URL;
   const previousKeyRef = process.env.IMAGE_MODEL_API_KEY_SECRET_REF;
   const previousFakeProviderKey = process.env.FAKE_PROVIDER_KEY;
+  const previousAsyncResultTemplateForProvider = process.env.IMAGE_MODEL_ASYNC_RESULT_URL_TEMPLATE;
   try {
     const providerImage = await sharp({ create: { width: 16, height: 16, channels: 3, background: "#155e75" } }).png().toBuffer();
     process.env.IMAGE_MODEL_EXECUTION = "live";
@@ -834,6 +835,7 @@ async function run() {
     process.env.IMAGE_MODEL_BASE_URL = "https://provider.example.test/v1";
     process.env.IMAGE_MODEL_API_KEY_SECRET_REF = "FAKE_PROVIDER_KEY";
     process.env.FAKE_PROVIDER_KEY = "fake-key";
+    delete process.env.IMAGE_MODEL_ASYNC_RESULT_URL_TEMPLATE;
     globalThis.fetch = async () => new Response(JSON.stringify({ data: [{ b64_json: providerImage.toString("base64") }] }), {
       status: 200,
       headers: { "content-type": "application/json", "x-request-id": "provider-request-1" }
@@ -878,8 +880,51 @@ async function run() {
     expect(agnesExtraBody?.style_preset === "极简产品", "Agnes requests should pass stylePreset as provider metadata");
     expect(agnesExtraBody?.reference_strength === 78, "Agnes requests should pass reference strength as provider metadata");
     expect(agnesExtraBody?.structure_mode === "outline", "Agnes requests should pass structure mode as provider metadata");
+
+    process.env.IMAGE_MODEL_PROVIDER = "openai";
+    process.env.IMAGE_MODEL_NAME = "gpt-image-2";
+    process.env.IMAGE_MODEL_BASE_URL = "https://provider.example.test/v1";
+    globalThis.fetch = async () => new Response("<html><head><title>504 Gateway Time-out</title></head><body><center>nginx</center></body></html>", {
+      status: 504,
+      headers: { "content-type": "text/html" }
+    });
+    const gatewayTimeoutError = await submitImageGeneration({
+      taskType: "t2i",
+      prompt: "provider gateway timeout",
+      count: 1,
+      size: "1024x1024"
+    }).then(
+      () => undefined,
+      error => error instanceof Error ? error : new Error(String(error))
+    );
+    expect(gatewayTimeoutError?.message === "openai image generation failed: upstream gateway timeout (504)", "provider gateway timeout failures should not expose raw HTML");
+
+    const emptyOutputStore = createMockDataStore();
+    emptyOutputStore.users[0].memberStatus = "credit_pack";
+    emptyOutputStore.creditBuckets[0].remainingAmount = 50;
+    emptyOutputStore.creditBuckets[0].originalAmount = 50;
+    emptyOutputStore.tasks = [];
+    emptyOutputStore.creditHolds = [];
+    emptyOutputStore.ledgerEntries = [];
+    emptyOutputStore.providerSubmissions = [];
+    emptyOutputStore.providerResults = [];
+    setRepositoriesForTesting(createMockRepositories(emptyOutputStore));
+    process.env.IMAGE_MODEL_PROVIDER = "openai";
+    process.env.IMAGE_MODEL_NAME = "gpt-image-2";
+    process.env.IMAGE_MODEL_BASE_URL = "https://provider.example.test/v1";
+    globalThis.fetch = async () => new Response(JSON.stringify({ data: [{}] }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+    const emptyOutputTask = await createTask({ taskType: "t2i", prompt: "empty provider output", count: 1, size: "1024x1024" }, emptyOutputStore.users[0].id);
+    const failedEmptyOutputTask = await runImageTask(emptyOutputTask.id, emptyOutputStore.users[0].id);
+    expect(failedEmptyOutputTask?.status === "failed", "live provider responses without image output should fail instead of becoming unpollable async tasks");
+    expect(failedEmptyOutputTask?.errorMessage?.includes("returned no image output"), "empty provider output failure should explain the missing image payload");
+    expect(emptyOutputStore.creditHolds[0]?.status === "released", "empty provider output failure should release the reserved credit hold");
   } finally {
     globalThis.fetch = originalFetch;
+    if (previousAsyncResultTemplateForProvider) process.env.IMAGE_MODEL_ASYNC_RESULT_URL_TEMPLATE = previousAsyncResultTemplateForProvider;
+    else delete process.env.IMAGE_MODEL_ASYNC_RESULT_URL_TEMPLATE;
     if (previousExecutionForProvider) process.env.IMAGE_MODEL_EXECUTION = previousExecutionForProvider;
     else delete process.env.IMAGE_MODEL_EXECUTION;
     if (previousProvider) process.env.IMAGE_MODEL_PROVIDER = previousProvider;
@@ -1158,6 +1203,45 @@ async function run() {
   expect(runnerStore.ledgerEntries.some(entry => entry.entryType === "spend"), "approved provider output should write spend ledger entries");
   setRepositoriesForTesting(undefined);
 
+  const concurrentRunnerStore = createMockDataStore();
+  concurrentRunnerStore.users[0].memberStatus = "credit_pack";
+  concurrentRunnerStore.creditBuckets[0].remainingAmount = 100;
+  concurrentRunnerStore.creditBuckets[0].originalAmount = 100;
+  concurrentRunnerStore.tasks = [];
+  concurrentRunnerStore.assets = [];
+  concurrentRunnerStore.creditHolds = [];
+  concurrentRunnerStore.ledgerEntries = [];
+  concurrentRunnerStore.providerSubmissions = [];
+  concurrentRunnerStore.providerResults = [];
+  const concurrentRepositories = createMockRepositories(concurrentRunnerStore);
+  const concurrentGetTask = concurrentRepositories.image.getTask;
+  concurrentRepositories.image.getTask = async taskId => {
+    const task = await concurrentGetTask(taskId);
+    return task ? JSON.parse(JSON.stringify(task)) : undefined;
+  };
+  const concurrentUpdateTask = concurrentRepositories.image.updateTask;
+  concurrentRepositories.image.updateTask = async (taskId, patch) => {
+    if (patch.status === "running") await new Promise(resolve => setTimeout(resolve, 5));
+    return concurrentUpdateTask(taskId, patch);
+  };
+  const concurrentCreateProviderSubmission = concurrentRepositories.image.createProviderSubmission;
+  concurrentRepositories.image.createProviderSubmission = async submission => {
+    if (concurrentRunnerStore.providerSubmissions.some(item => item.id === submission.id)) {
+      throw new Error("Unique constraint failed on the constraint: `PRIMARY`");
+    }
+    return concurrentCreateProviderSubmission(submission);
+  };
+  setRepositoriesForTesting(concurrentRepositories);
+  const concurrentTask = await createTask({ taskType: "t2i", prompt: "concurrent runner", count: 1, size: "512x512" }, concurrentRunnerStore.users[0].id);
+  const concurrentResults = await Promise.all([
+    runImageTask(concurrentTask.id, concurrentRunnerStore.users[0].id),
+    runImageTask(concurrentTask.id, concurrentRunnerStore.users[0].id)
+  ]);
+  expect(concurrentRunnerStore.providerSubmissions.length === 1, "concurrent task runners should create only one provider submission");
+  expect(concurrentRunnerStore.tasks[0]?.status !== "failed", "concurrent task runners should not fail the task with duplicate provider submission ids");
+  expect(concurrentResults.every(task => task?.status !== "failed"), "duplicate runner callers should receive a non-failed task state");
+  setRepositoriesForTesting(undefined);
+
   const approximateDimensionStore = createMockDataStore();
   approximateDimensionStore.users[0].memberStatus = "credit_pack";
   approximateDimensionStore.creditBuckets[0].remainingAmount = 100;
@@ -1186,6 +1270,19 @@ async function run() {
     expect(completedApproximateDimensionTask?.status === "succeeded", "provider output with close matching aspect ratio and dimensions should pass output review");
     expect(approximateDimensionStore.assets[0]?.width === 736 && approximateDimensionStore.assets[0]?.height === 1312, "approved approximate provider output should preserve returned dimensions");
     expect(approximateDimensionStore.creditHolds[0]?.status === "spent", "approved approximate provider output should spend the credit hold");
+
+    const largerOutput = await sharp({ create: { width: 941, height: 1672, channels: 3, background: "#164e63" } }).png().toBuffer();
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      data: [{ b64_json: largerOutput.toString("base64") }]
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json", "x-request-id": "larger-dimensions-provider-request-1" }
+    });
+    const largerDimensionTask = await createTask({ taskType: "t2i", prompt: "runner accepts provider larger dimensions", count: 1, size: "768x1344" }, approximateDimensionStore.users[0].id);
+    const completedLargerDimensionTask = await runImageTask(largerDimensionTask.id, approximateDimensionStore.users[0].id);
+    const largerDimensionAsset = approximateDimensionStore.assets.find(asset => asset.taskId === largerDimensionTask.id);
+    expect(completedLargerDimensionTask?.status === "succeeded", "provider output with larger same-aspect dimensions should pass output review");
+    expect(largerDimensionAsset?.width === 941 && largerDimensionAsset?.height === 1672, "approved larger provider output should preserve returned dimensions");
   } finally {
     globalThis.fetch = originalFetch;
     if (previousExecutionForApproximateDimensions) process.env.IMAGE_MODEL_EXECUTION = previousExecutionForApproximateDimensions;
@@ -1390,6 +1487,7 @@ async function run() {
   const previousBaseUrlForAsync = process.env.IMAGE_MODEL_BASE_URL;
   const previousFluxArtImageApiKeyForAsync = process.env.FLUXART_IMAGE_API_KEY;
   const previousAsyncResultTemplate = process.env.IMAGE_MODEL_ASYNC_RESULT_URL_TEMPLATE;
+  const previousRequestTimeoutForAsync = process.env.IMAGE_MODEL_REQUEST_TIMEOUT_MS;
   try {
     const asyncProviderImage = await sharp({ create: { width: 1024, height: 1024, channels: 3, background: "#0f172a" } }).png().toBuffer();
     let asyncResultReady = false;
@@ -1418,6 +1516,43 @@ async function run() {
     expect(completedAsyncTask?.status === "succeeded", "async provider tasks should complete after result polling returns output");
     expect(asyncRunnerStore.providerResults[0]?.status === "succeeded", "async provider success should record a succeeded provider result");
     expect(asyncRunnerStore.assets[0]?.reviewStatus === "approved", "async provider success should create an approved asset");
+
+    const staleAsyncStore = createMockDataStore();
+    const staleAsyncHoldId = "hold-stale-async-runner";
+    staleAsyncStore.creditHolds = [{
+      id: staleAsyncHoldId,
+      userId: staleAsyncStore.users[0].id,
+      amount: 10,
+      status: "active",
+      taskId: "task-stale-async-runner",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      createdAt: new Date(Date.now() - 10_000).toISOString(),
+      updatedAt: new Date(Date.now() - 10_000).toISOString()
+    }];
+    staleAsyncStore.tasks = [{
+      id: "task-stale-async-runner",
+      userId: staleAsyncStore.users[0].id,
+      taskType: "t2i",
+      status: "running",
+      prompt: "stale async runner",
+      requestPayload: { providerMode: "async", externalTaskId: "external-stale-async-runner", providerSubmissionId: "submission-task-stale-async-runner", size: "1024x1024" },
+      modelProvider: "custom",
+      modelName: "external-image-model",
+      chargedCredits: 10,
+      priority: 10,
+      creditHoldId: staleAsyncHoldId,
+      resultAssetIds: [],
+      createdAt: new Date(Date.now() - 10_000).toISOString(),
+      updatedAt: new Date(Date.now() - 10_000).toISOString()
+    }];
+    staleAsyncStore.providerResults = [];
+    staleAsyncStore.assets = [];
+    setRepositoriesForTesting(createMockRepositories(staleAsyncStore));
+    process.env.IMAGE_MODEL_REQUEST_TIMEOUT_MS = "1000";
+    const failedStaleAsyncTask = await runImageTask("task-stale-async-runner", staleAsyncStore.users[0].id);
+    expect(failedStaleAsyncTask?.status === "failed", "stale async provider tasks should fail after the model request timeout");
+    expect(failedStaleAsyncTask?.errorMessage?.includes("async image result timed out"), "stale async provider failure should explain the timeout");
+    expect(staleAsyncStore.creditHolds[0]?.status === "released", "stale async provider timeout should release the reserved credit hold");
   } finally {
     globalThis.fetch = originalFetch;
     if (previousExecutionForAsync) process.env.IMAGE_MODEL_EXECUTION = previousExecutionForAsync;
@@ -1428,6 +1563,8 @@ async function run() {
     else delete process.env.FLUXART_IMAGE_API_KEY;
     if (previousAsyncResultTemplate) process.env.IMAGE_MODEL_ASYNC_RESULT_URL_TEMPLATE = previousAsyncResultTemplate;
     else delete process.env.IMAGE_MODEL_ASYNC_RESULT_URL_TEMPLATE;
+    if (previousRequestTimeoutForAsync) process.env.IMAGE_MODEL_REQUEST_TIMEOUT_MS = previousRequestTimeoutForAsync;
+    else delete process.env.IMAGE_MODEL_REQUEST_TIMEOUT_MS;
     setRepositoriesForTesting(undefined);
   }
 

@@ -27,6 +27,8 @@ type TestResult = {
   testedAt: string;
 };
 
+type BusyState = "load" | "save" | `test:${string}` | `restore:${string}`;
+
 const fallbackModel: EditableSelectableImageModel = {
   id: "agnes-image-2-1-flash",
   displayName: "Agnes Image 2.1 Flash",
@@ -91,7 +93,7 @@ export function ModelConfigAdmin() {
   const [state, setState] = useState<AdminState | undefined>();
   const [message, setMessage] = useState("");
   const [testResult, setTestResult] = useState<TestResult | undefined>();
-  const [busy, setBusy] = useState<"load" | "save" | "test" | `restore:${string}` | undefined>();
+  const [busy, setBusy] = useState<BusyState | undefined>();
   const initialLoadStarted = useRef(false);
 
   const adminHeaders = useMemo(() => {
@@ -178,8 +180,9 @@ export function ModelConfigAdmin() {
   }
 
   async function testConfig(model: EditableSelectableImageModel) {
-    setBusy("test");
-    setMessage("");
+    setBusy(`test:${model.id}`);
+    setTestResult(undefined);
+    setMessage(`正在测试 ${model.displayName || model.model}...`);
     try {
       const response = await fetch("/api/admin/model-config/test", {
         method: "POST",
@@ -219,6 +222,7 @@ export function ModelConfigAdmin() {
 
   const current = state?.configuration || models.find(model => model.isDefault) || models[0];
   const currentUpdatedAt = current && "updatedAt" in current && typeof current.updatedAt === "string" ? current.updatedAt : undefined;
+  const testingModelId = busy?.startsWith("test:") ? busy.slice("test:".length) : undefined;
 
   return (
     <main className="admin-page">
@@ -311,7 +315,7 @@ export function ModelConfigAdmin() {
                   <div className="row">
                     <label className="small"><input type="checkbox" checked={model.enabled} onChange={event => patchModel(model.id, { enabled: event.target.checked })} /> enabled</label>
                     <label className="small"><input type="radio" name="default-model" checked={model.isDefault} onChange={() => patchModel(model.id, { isDefault: true })} /> default</label>
-                    <button className="btn" type="button" onClick={() => void testConfig(model)} disabled={busy === "test"}><FlaskConical size={17} aria-hidden="true" /> 测试</button>
+                    <button className="btn" type="button" onClick={() => void testConfig(model)} disabled={busy !== undefined}><FlaskConical size={17} aria-hidden="true" /> {testingModelId === model.id ? "测试中..." : "测试"}</button>
                     <button className="btn" type="button" onClick={() => removeModel(model.id)} disabled={models.length <= 1} title="删除此模型配置" aria-label="删除此模型配置"><Trash2 size={17} aria-hidden="true" /> 删除</button>
                   </div>
                 </div>

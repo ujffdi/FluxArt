@@ -35,6 +35,7 @@ export interface ImageRepository {
   listTasks: (options?: { userId?: string }) => Promise<ImageGenerationTask[]>;
   getTask: (taskId: string) => Promise<ImageGenerationTask | undefined>;
   createTask: (task: ImageGenerationTask | CreateImageTaskRecordInput) => Promise<ImageGenerationTask>;
+  claimQueuedTask: (taskId: string) => Promise<ImageGenerationTask | undefined>;
   updateTask: (taskId: string, patch: Partial<ImageGenerationTask>) => Promise<ImageGenerationTask | undefined>;
   listVersionNodes: () => Promise<AssetVersionNode[]>;
   createUpload: (upload: ImageUploadRecord) => Promise<ImageUploadRecord>;
@@ -384,6 +385,12 @@ export function createMockRepositories(store: AppDataStore = createMockDataStore
       async createTask(taskInput) {
         const task = createTaskRecord(taskInput);
         store.tasks.unshift(task);
+        return task;
+      },
+      async claimQueuedTask(taskId) {
+        const task = store.tasks.find(item => item.id === taskId);
+        if (!task || task.status !== "queued") return undefined;
+        Object.assign(task, { status: "running", updatedAt: nowIso() });
         return task;
       },
       async updateTask(taskId, patch) {

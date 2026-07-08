@@ -425,6 +425,13 @@ function requireModelConfigRawSql(client: PrismaClientLike): RawSqlPrismaClient 
   return client as RawSqlPrismaClient;
 }
 
+function requireRawSql(client: PrismaClientLike): RawSqlPrismaClient {
+  if (!client.$executeRawUnsafe || !client.$queryRawUnsafe) {
+    throw new Error("Prisma client does not expose raw SQL support. Run `npx prisma generate` after applying the latest schema.");
+  }
+  return client as RawSqlPrismaClient;
+}
+
 function isDbRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -432,6 +439,48 @@ function isDbRecord(value: unknown): value is Record<string, unknown> {
 function hasDatabaseErrorCode(error: unknown, code: string) {
   if (!isDbRecord(error)) return false;
   return error.code === code || error.errno === code || (typeof error.message === "string" && error.message.includes(`Code: \`${code}\``));
+}
+
+function isPrismaUnknownArgumentError(error: unknown, argument: string) {
+  return isDbRecord(error) && typeof error.message === "string" && error.message.includes(`Unknown argument \`${argument}\``);
+}
+
+async function ensurePreferredImageModelColumn(client: RawSqlPrismaClient) {
+  const rows = await client.$queryRawUnsafe(
+    `SELECT COLUMN_NAME AS columnName
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'users'
+       AND COLUMN_NAME = 'preferred_image_model_id'
+     LIMIT 1`
+  );
+  if (rows.length) return;
+  await client.$executeRawUnsafe("ALTER TABLE `users` ADD COLUMN `preferred_image_model_id` VARCHAR(64) NULL");
+}
+
+async function readPreferredImageModelId(client: PrismaClientLike, userId: string, user?: DbRecord | null) {
+  const delegateValue = asString(user?.preferredImageModelId);
+  if (delegateValue) return delegateValue;
+  if (!client.$queryRawUnsafe) return undefined;
+  const rawClient = requireRawSql(client);
+  await ensurePreferredImageModelColumn(rawClient);
+  const rows = await rawClient.$queryRawUnsafe(
+    "SELECT preferred_image_model_id AS preferredImageModelId FROM users WHERE id = ? LIMIT 1",
+    userId
+  );
+  return asString(rows[0]?.preferredImageModelId) || undefined;
+}
+
+async function updatePreferredImageModelRaw(client: PrismaClientLike, userId: string, preferredImageModelId?: string) {
+  const rawClient = requireRawSql(client);
+  await ensurePreferredImageModelColumn(rawClient);
+  await rawClient.$executeRawUnsafe(
+    "UPDATE users SET preferred_image_model_id = ?, updated_at = ? WHERE id = ?",
+    preferredImageModelId || null,
+    toMysqlDateTime(new Date()),
+    userId
+  );
+  return rawClient.$queryRawUnsafe("SELECT * FROM users WHERE id = ? LIMIT 1", userId).then(rows => rows[0]);
 }
 
 async function ensureActiveModelConfigurationColumns(client: RawSqlPrismaClient) {
@@ -828,6 +877,17 @@ export function createPrismaRepositories(): AppRepositories {
         });
         return taskFromRecord(record);
       },
+      async claimQueuedTask(taskId) {
+        const prisma = await getPrismaClient();
+        const now = new Date();
+        const result = await prisma.imageTask.updateMany?.({
+          where: { id: taskId, state: "queued" },
+          data: { state: "running", runningAt: now, updatedAt: now }
+        });
+        if (!result?.count) return undefined;
+        const record = await prisma.imageTask.findUnique?.({ where: { id: taskId }, include: { assets: { select: { id: true } } } });
+        return record ? taskFromRecord(record) : undefined;
+      },
       async updateTask(taskId, patch) {
         const prisma = await getPrismaClient();
         const data: Record<string, unknown> = { ...patch };
@@ -957,19 +1017,20 @@ export function createPrismaRepositories(): AppRepositories {
         const credits = buckets
           .filter(bucket => toIso(bucket.validFrom) <= nowIso && (!bucket.validUntil || toIso(bucket.validUntil) > nowIso))
           .reduce((sum, bucket) => sum + asNumber(bucket.remainingAmount), 0);
-        return accountFromUser(user, credits, asString(credential?.username));
+        return accountFromUser({ ...user, preferredImageModelId: await readPreferredImageModelId(prisma, asString(user.id), user) }, credits, asString(credential?.username));
       },
       async getUserById(userId) {
         const prisma = await getPrismaClient();
         const user = await prisma.user.findUnique?.({ where: { id: userId } });
         if (!user) return undefined;
+        const preferredImageModelId = await readPreferredImageModelId(prisma, userId, user);
         return {
           id: asString(user.id),
           username: asString((await prisma.userCredential.findUnique?.({ where: { userId } }))?.username),
           displayName: asString(user.displayName),
           status: asString(user.status, "active") as "active" | "disabled",
           memberStatus: asString(user.memberStatus, "free") as AccountEntitlement["memberStatus"],
-          preferredImageModelId: asString(user.preferredImageModelId) || undefined,
+          preferredImageModelId,
           createdAt: toIso(user.createdAt),
           updatedAt: toIso(user.updatedAt)
         };
@@ -988,13 +1049,14 @@ export function createPrismaRepositories(): AppRepositories {
             memberStatus: input.memberStatus || "free"
           }
         });
+        const preferredImageModelId = await readPreferredImageModelId(prisma, asString(user.id), user);
         return {
           id: asString(user.id),
           username: input.username,
           displayName: asString(user.displayName),
           status: asString(user.status, "active") as "active" | "disabled",
           memberStatus: asString(user.memberStatus, "free") as AccountEntitlement["memberStatus"],
-          preferredImageModelId: asString(user.preferredImageModelId) || undefined,
+          preferredImageModelId,
           createdAt: toIso(user.createdAt),
           updatedAt: toIso(user.updatedAt)
         };
@@ -1003,20 +1065,30 @@ export function createPrismaRepositories(): AppRepositories {
         const prisma = await getPrismaClient();
         const user = await prisma.user.update?.({ where: { id: userId }, data: { memberStatus } });
         if (!user) return undefined;
+        const preferredImageModelId = await readPreferredImageModelId(prisma, userId, user);
         return {
           id: asString(user.id),
           username: asString((await prisma.userCredential.findUnique?.({ where: { userId } }))?.username),
           displayName: asString(user.displayName),
           status: asString(user.status, "active") as "active" | "disabled",
           memberStatus: asString(user.memberStatus, "free") as AccountEntitlement["memberStatus"],
-          preferredImageModelId: asString(user.preferredImageModelId) || undefined,
+          preferredImageModelId,
           createdAt: toIso(user.createdAt),
           updatedAt: toIso(user.updatedAt)
         };
       },
       async updatePreferredImageModel(userId, preferredImageModelId) {
         const prisma = await getPrismaClient();
-        const user = await prisma.user.update?.({ where: { id: userId }, data: { preferredImageModelId: preferredImageModelId || null } });
+        let user: DbRecord | null | undefined;
+        try {
+          user = await prisma.user.update?.({ where: { id: userId }, data: { preferredImageModelId: preferredImageModelId || null } });
+        } catch (error) {
+          if (!isPrismaUnknownArgumentError(error, "preferredImageModelId")) throw error;
+          user = await updatePreferredImageModelRaw(prisma, userId, preferredImageModelId);
+        }
+        if (!user && !prisma.user.update) {
+          user = await updatePreferredImageModelRaw(prisma, userId, preferredImageModelId);
+        }
         if (!user) return undefined;
         return {
           id: asString(user.id),
@@ -1024,7 +1096,7 @@ export function createPrismaRepositories(): AppRepositories {
           displayName: asString(user.displayName),
           status: asString(user.status, "active") as "active" | "disabled",
           memberStatus: asString(user.memberStatus, "free") as AccountEntitlement["memberStatus"],
-          preferredImageModelId: asString(user.preferredImageModelId) || undefined,
+          preferredImageModelId: await readPreferredImageModelId(prisma, userId, user),
           createdAt: toIso(user.createdAt),
           updatedAt: toIso(user.updatedAt)
         };

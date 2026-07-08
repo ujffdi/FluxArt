@@ -440,6 +440,14 @@ async function run() {
     const fallbackOptions = await fallbackModelSelect.locator("option").allTextContents();
     if (fallbackOptions.some(option => option.includes("Premium Smoke Model"))) fail("disabled model should disappear from workspace options");
     await page.getByText("原模型不可用，已切换到默认模型。").waitFor({ timeout: 10000 });
+    await page.waitForTimeout(2700);
+    await page.getByRole("link", { name: "资产中心" }).click();
+    await page.waitForLoadState("networkidle");
+    await page.waitForTimeout(500);
+    const repeatedFallbackToast = await page.locator(".toast.show", { hasText: "原模型不可用，已切换到默认模型" }).count();
+    if (repeatedFallbackToast > 0) fail("model fallback toast should not repeat after top navigation");
+    await page.getByRole("link", { name: "生图工作台" }).click();
+    await page.waitForLoadState("networkidle");
 
     await page.locator("header").getByRole("button", { name: "退出", exact: true }).click();
     await page.getByRole("button", { name: "确认退出" }).click();
